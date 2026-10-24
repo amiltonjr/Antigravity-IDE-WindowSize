@@ -3,19 +3,22 @@
 """
 Antigravity Window Size Persistence Patch
 ==========================================
-Este script localiza o Antigravity.app no macOS, aplica persistência de tamanho
-e posição da janela (lembrando as últimas dimensões deixadas pelo usuário),
-atualiza a integridade do ASAR no Info.plist e refaz a assinatura com codesign.
+Cross-platform utility (macOS & Windows) to automatically persist and restore
+the window size, position, and maximized state of Google Antigravity.
 
-Funciona de forma 100% autônoma no macOS utilizando apenas a biblioteca padrão do Python 3.
-Zero dependências externas (sem necessidade de npm, pip ou npx).
+Features:
+- Automatically detects Antigravity installation on macOS and Windows.
+- Injects non-intrusive window persistence into dist/utils.js in app.asar.
+- Automatically handles multi-monitor screen repositioning safety.
+- Manages Electron ASAR integrity and macOS codesigning where applicable.
+- Creates master and timestamped backups with instant one-command restore.
+- 100% standalone using Python standard library (no npm, pip, or node needed).
 """
 
 import argparse
 import hashlib
 import json
 import os
-import plistlib
 import shutil
 import struct
 import subprocess
@@ -23,12 +26,20 @@ import sys
 import time
 from pathlib import Path
 
-PATCH_MARKER = "/* __ANTIGRAVITY_WINDOW_PERSISTENCE_PATCH_V1__ */"
+# Enable UTF-8 encoding and ANSI color sequences on Windows console
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    try:
+        os.system("")
+    except Exception:
+        pass
 
-CANDIDATE_PATHS = [
-    "/Applications/Antigravity.app",
-    os.path.expanduser("~/Applications/Antigravity.app"),
-]
+PATCH_MARKER = "/* __ANTIGRAVITY_WINDOW_PERSISTENCE_PATCH_V1__ */"
 
 
 def log(msg: str):
@@ -47,59 +58,211 @@ def log_error(msg: str):
     print(f"\033[1;31m[✗]\033[0m {msg}", file=sys.stderr)
 
 
-def find_antigravity_app(custom_path: str = None) -> str:
-    """Localiza o diretório do Antigravity.app no sistema."""
+class AppPaths:
+    """Holds resolved paths for an Antigravity installation."""
+
+    def __init__(
+        self,
+        app_root: str,
+        asar_path: str,
+        resources_dir: str,
+        info_plist_path: str = None,
+    ):
+        self.app_root = app_root
+        self.asar_path = asar_path
+        self.resources_dir = resources_dir
+        self.info_plist_path = info_plist_path
+        self.backup_orig = os.path.join(resources_dir, "app.asar.orig")
+
+
+def resolve_app_structure(base_path: str) -> AppPaths:
+    """Resolves whether a given directory or file is a valid Antigravity install."""
+    if not base_path:
+        return None
+
+    p = os.path.abspath(os.path.expanduser(base_path))
+
+    # Case 1: Directly points to app.asar
+    if os.path.isfile(p) and os.path.basename(p) == "app.asar":
+        resources_dir = os.path.dirname(p)
+        parent = os.path.dirname(resources_dir)
+        plist = os.path.join(parent, "Info.plist")
+        return AppPaths(
+            app_root=parent,
+            asar_path=p,
+            resources_dir=resources_dir,
+            info_plist_path=plist if os.path.exists(plist) else None,
+        )
+
+    # Case 2: Points to an executable binary (e.g., Antigravity.exe)
+    if os.path.isfile(p):
+        p = os.path.dirname(p)
+
+    # Case 3: macOS bundle layout (<app>/Contents/Resources/app.asar)
+    macos_asar = os.path.join(p, "Contents", "Resources", "app.asar")
+    if os.path.exists(macos_asar):
+        plist = os.path.join(p, "Contents", "Info.plist")
+        return AppPaths(
+            app_root=p,
+            asar_path=macos_asar,
+            resources_dir=os.path.join(p, "Contents", "Resources"),
+            info_plist_path=plist if os.path.exists(plist) else None,
+        )
+
+    # Case 4: Windows / standard layout (<app>/resources/app.asar)
+    win_asar = os.path.join(p, "resources", "app.asar")
+    if os.path.exists(win_asar):
+        return AppPaths(
+            app_root=p,
+            asar_path=win_asar,
+            resources_dir=os.path.join(p, "resources"),
+            info_plist_path=None,
+        )
+
+    # Case 5: Path is directly the resources folder containing app.asar
+    direct_asar = os.path.join(p, "app.asar")
+    if os.path.exists(direct_asar):
+        parent = os.path.dirname(p)
+        return AppPaths(
+            app_root=parent,
+            asar_path=direct_asar,
+            resources_dir=p,
+            info_plist_path=None,
+        )
+
+    return None
+
+
+def get_default_candidate_paths() -> list:
+    """Returns candidate paths for Antigravity based on the host OS."""
+    candidates = []
+
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidates.append(os.path.join(local_app_data, "Programs", "antigravity"))
+        candidates.append(os.path.expanduser("~/AppData/Local/Programs/antigravity"))
+
+        prog_files = os.environ.get("ProgramFiles")
+        if prog_files:
+            candidates.append(os.path.join(prog_files, "Antigravity"))
+            candidates.append(os.path.join(prog_files, "antigravity"))
+
+        prog_files_x86 = os.environ.get("ProgramFiles(x86)")
+        if prog_files_x86:
+            candidates.append(os.path.join(prog_files_x86, "Antigravity"))
+            candidates.append(os.path.join(prog_files_x86, "antigravity"))
+
+    elif sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Antigravity.app",
+            os.path.expanduser("~/Applications/Antigravity.app"),
+        ])
+    else:
+        candidates.extend([
+            "/opt/Antigravity",
+            "/opt/antigravity",
+            "/usr/lib/antigravity",
+            os.path.expanduser("~/.local/share/antigravity"),
+        ])
+
+    return candidates
+
+
+def find_antigravity_app(custom_path: str = None) -> AppPaths:
+    """Finds and resolves the Antigravity installation on the system."""
     if custom_path:
-        p = os.path.abspath(os.path.expanduser(custom_path))
-        if os.path.isdir(p) and os.path.exists(os.path.join(p, "Contents", "Resources", "app.asar")):
-            return p
-        log_error(f"Caminho especificado não contém um Antigravity.app válido: {custom_path}")
+        resolved = resolve_app_structure(custom_path)
+        if resolved:
+            return resolved
+        log_error(f"Specified path does not contain a valid Antigravity installation: {custom_path}")
         sys.exit(1)
 
-    for p in CANDIDATE_PATHS:
-        if os.path.isdir(p) and os.path.exists(os.path.join(p, "Contents", "Resources", "app.asar")):
-            return p
+    # Search standard candidate paths
+    for candidate in get_default_candidate_paths():
+        resolved = resolve_app_structure(candidate)
+        if resolved:
+            return resolved
 
-    # Tenta localizar via Spotlight/mdfind
-    try:
-        res = subprocess.run(
-            ["mdfind", 'kMDItemCFBundleIdentifier == "com.google.antigravity"'],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        for line in res.stdout.strip().splitlines():
-            line = line.strip()
-            if line.endswith(".app") and os.path.exists(os.path.join(line, "Contents", "Resources", "app.asar")):
-                return line
-    except Exception:
-        pass
+    # On macOS, attempt Spotlight lookup
+    if sys.platform == "darwin":
+        try:
+            res = subprocess.run(
+                ["mdfind", 'kMDItemCFBundleIdentifier == "com.google.antigravity"'],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in res.stdout.strip().splitlines():
+                line = line.strip()
+                if line.endswith(".app"):
+                    resolved = resolve_app_structure(line)
+                    if resolved:
+                        return resolved
+        except Exception:
+            pass
 
-    log_error("Não foi possível localizar o Antigravity.app no sistema.")
+    log_error("Could not automatically locate the Antigravity installation.")
+    log_error("Please specify its location manually using: --app <path>")
     sys.exit(1)
 
 
-def is_app_running(app_path: str) -> bool:
-    """Verifica se o Antigravity está em execução."""
-    try:
-        res = subprocess.run(["pgrep", "-f", f"{app_path}/Contents/MacOS/Antigravity"], capture_output=True)
-        return res.returncode == 0
-    except Exception:
-        return False
+def is_app_running(app_paths: AppPaths) -> bool:
+    """Checks whether Antigravity is currently running."""
+    if sys.platform == "win32":
+        try:
+            res = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Antigravity.exe", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return "antigravity.exe" in res.stdout.lower()
+        except Exception:
+            return False
+    elif sys.platform == "darwin":
+        try:
+            res = subprocess.run(
+                ["pgrep", "-f", f"{app_paths.app_root}/Contents/MacOS/Antigravity"],
+                capture_output=True,
+                timeout=5,
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+    else:
+        try:
+            res = subprocess.run(["pgrep", "-f", "antigravity"], capture_output=True, timeout=5)
+            return res.returncode == 0
+        except Exception:
+            return False
 
 
-def kill_running_app(app_path: str):
-    """Fecha o aplicativo caso esteja aberto."""
-    log_warn("Encerrando instâncias em execução do Antigravity...")
-    try:
-        subprocess.run(["pkill", "-f", f"{app_path}/Contents/MacOS/Antigravity"], check=False)
-        time.sleep(1.5)
-    except Exception as e:
-        log_error(f"Erro ao encerrar processo: {e}")
+def kill_running_app(app_paths: AppPaths):
+    """Terminates running instances of Antigravity."""
+    log_warn("Closing running Antigravity processes...")
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "Antigravity.exe", "/T"], check=False, capture_output=True)
+            time.sleep(1.5)
+        except Exception as e:
+            log_error(f"Error terminating process: {e}")
+    elif sys.platform == "darwin":
+        try:
+            subprocess.run(["pkill", "-f", f"{app_paths.app_root}/Contents/MacOS/Antigravity"], check=False)
+            time.sleep(1.5)
+        except Exception as e:
+            log_error(f"Error terminating process: {e}")
+    else:
+        try:
+            subprocess.run(["pkill", "-f", "antigravity"], check=False)
+            time.sleep(1.5)
+        except Exception as e:
+            log_error(f"Error terminating process: {e}")
 
 
 def compute_electron_integrity(data: bytes) -> dict:
-    """Calcula a integridade de bloco SHA-256 no formato esperado pelo Electron ASAR."""
+    """Calculates SHA-256 block-level integrity hash in Electron ASAR format."""
     block_size = 4 * 1024 * 1024  # 4 MB
     blocks = []
     for i in range(0, len(data), block_size):
@@ -114,14 +277,14 @@ def compute_electron_integrity(data: bytes) -> dict:
 
 
 def parse_asar(asar_path: str):
-    """Lê o header e o payload de um arquivo ASAR."""
+    """Reads and parses the header and payload of an ASAR archive."""
     with open(asar_path, "rb") as f:
         hdr = f.read(16)
         if len(hdr) < 16:
-            raise ValueError("Arquivo ASAR inválido ou truncado.")
+            raise ValueError("ASAR file is truncated or invalid.")
         magic, size1, size2, json_size = struct.unpack("<4I", hdr)
         if magic != 4:
-            raise ValueError(f"Magic header ASAR inesperado: {magic}")
+            raise ValueError(f"Unexpected ASAR magic header: {magic}")
         json_data = f.read(json_size).decode("utf-8")
         header = json.loads(json_data)
         pad_len = (4 - (json_size % 4)) % 4
@@ -131,7 +294,7 @@ def parse_asar(asar_path: str):
 
 
 def build_asar(header: dict, payload: bytes) -> bytes:
-    """Constrói o binário ASAR completo a partir do header JSON e do payload."""
+    """Builds a complete ASAR binary from JSON header dict and raw payload."""
     json_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
     json_len = len(json_bytes)
     pad_len = (4 - (json_len % 4)) % 4
@@ -147,7 +310,7 @@ def build_asar(header: dict, payload: bytes) -> bytes:
 
 
 def generate_patched_utils_js(original_code: str) -> str:
-    """Gera o código modificado de dist/utils.js com a persistência de janela."""
+    """Injects window persistence logic into dist/utils.js."""
     if PATCH_MARKER in original_code:
         return original_code
 
@@ -194,7 +357,7 @@ def generate_patched_utils_js(original_code: str) -> str:
             }}
         }}
     }} catch (e) {{
-        console.error("[WindowPersistence] Erro ao carregar dimensões salvas:", e);
+        console.error("[WindowPersistence] Error loading saved window bounds:", e);
     }}
 """
 
@@ -240,7 +403,7 @@ def generate_patched_utils_js(original_code: str) -> str:
                     fs.writeFileSync(sPath, JSON.stringify(cur, null, 2), "utf-8");
                 }
             } catch (err) {
-                console.error("[WindowPersistence] Erro ao persistir dimensões:", err);
+                console.error("[WindowPersistence] Error persisting window bounds:", err);
             }
         }, 250);
     };
@@ -253,11 +416,11 @@ def generate_patched_utils_js(original_code: str) -> str:
     return win;"""
 
     if target_create_window not in original_code:
-        raise RuntimeError("Assinatura 'function createWindow(url, storageManager)' não encontrada em dist/utils.js")
+        raise RuntimeError("Signature 'function createWindow(url, storageManager)' not found in dist/utils.js")
     if target_browser_window not in original_code:
-        raise RuntimeError("Inicialização padrão 'width: 1400, height: 900' não encontrada em dist/utils.js")
+        raise RuntimeError("Default initialization 'width: 1400, height: 900' not found in dist/utils.js")
     if target_return_win not in original_code:
-        raise RuntimeError("Trecho final 'void win.loadURL(url); return win;' não encontrado em dist/utils.js")
+        raise RuntimeError("Snippet 'void win.loadURL(url); return win;' not found in dist/utils.js")
 
     patched = patch_prelude + original_code.replace(
         target_create_window, replacement_create_window, 1
@@ -270,34 +433,37 @@ def generate_patched_utils_js(original_code: str) -> str:
     return patched
 
 
-def apply_patch(app_path: str, force_kill: bool = False):
-    """Aplica o patch de persistência de tamanho de janela no app especificado."""
-    asar_path = os.path.join(app_path, "Contents", "Resources", "app.asar")
-    info_plist_path = os.path.join(app_path, "Contents", "Info.plist")
+def apply_patch(app_paths: AppPaths, force_kill: bool = False):
+    """Applies the window size persistence patch to the targeted installation."""
+    asar_path = app_paths.asar_path
 
     if not os.path.exists(asar_path):
-        log_error(f"app.asar não encontrado em: {asar_path}")
+        log_error(f"app.asar not found at: {asar_path}")
         sys.exit(1)
 
-    if is_app_running(app_path):
+    if is_app_running(app_paths):
         if force_kill:
-            kill_running_app(app_path)
+            kill_running_app(app_paths)
         else:
-            log_warn("O Antigravity está em execução no momento.")
-            resp = input("Deseja fechar o aplicativo para aplicar o patch agora? [S/n]: ").strip().lower()
-            if resp in ("", "s", "sim", "y", "yes"):
-                kill_running_app(app_path)
+            log_warn("Antigravity is currently running.")
+            if sys.stdin.isatty():
+                resp = input("Do you want to close Antigravity to apply the patch now? [y/N]: ").strip().lower()
+                if resp in ("y", "yes", "s", "sim"):
+                    kill_running_app(app_paths)
+                else:
+                    log_error("Operation aborted. Please close Antigravity before applying the patch.")
+                    sys.exit(1)
             else:
-                log_error("Operação cancelada. Feche o Antigravity antes de aplicar o patch.")
+                log_error("Antigravity is running. Close it or use --kill to automatically terminate it.")
                 sys.exit(1)
 
-    log(f"Lendo e desempacotando ASAR: {asar_path}")
+    log(f"Unpacking and reading ASAR: {asar_path}")
     header, payload = parse_asar(asar_path)
 
     try:
         utils_entry = header["files"]["dist"]["files"]["utils.js"]
     except KeyError:
-        log_error("dist/utils.js não encontrado dentro do app.asar")
+        log_error("dist/utils.js not found inside app.asar")
         sys.exit(1)
 
     old_offset = int(utils_entry["offset"])
@@ -306,10 +472,10 @@ def apply_patch(app_path: str, force_kill: bool = False):
     original_utils_code = original_utils_bytes.decode("utf-8")
 
     if PATCH_MARKER in original_utils_code:
-        log_warn("O patch de persistência já está aplicado neste aplicativo!")
+        log_warn("Window persistence patch is already applied to this installation!")
         return
 
-    log("Injetando código de persistência de geometria (tamanho/posição/maximizado)...")
+    log("Injecting geometry persistence logic (size, position, maximized state)...")
     patched_utils_code = generate_patched_utils_js(original_utils_code)
     patched_utils_bytes = patched_utils_code.encode("utf-8")
 
@@ -335,79 +501,82 @@ def apply_patch(app_path: str, force_kill: bool = False):
         + payload[old_offset + old_size :]
     )
 
-    log("Reempacotando novo app.asar...")
+    log("Rebuilding new app.asar archive...")
     new_asar_bytes = build_asar(header, new_payload)
     new_asar_sha256 = hashlib.sha256(new_asar_bytes).hexdigest()
 
-    # Criação do backup de segurança
-    backup_orig = os.path.join(app_path, "Contents", "Resources", "app.asar.orig")
+    # Safety backups
+    backup_orig = app_paths.backup_orig
     backup_timestamp = os.path.join(
-        app_path,
-        "Contents",
-        "Resources",
+        app_paths.resources_dir,
         f"app.asar.backup-{time.strftime('%Y%m%d-%H%M%S')}",
     )
 
     if not os.path.exists(backup_orig):
-        log(f"Criando backup mestre original em: {backup_orig}")
+        log(f"Creating permanent original backup at: {backup_orig}")
         shutil.copy2(asar_path, backup_orig)
 
-    log(f"Criando backup pontual em: {backup_timestamp}")
+    log(f"Creating timestamped backup at: {backup_timestamp}")
     shutil.copy2(asar_path, backup_timestamp)
 
-    # Gravação do novo ASAR
+    # Atomic file write
     temp_asar = asar_path + ".tmp"
     with open(temp_asar, "wb") as f:
         f.write(new_asar_bytes)
     os.replace(temp_asar, asar_path)
-    log_success("Novo app.asar gravado com sucesso.")
+    log_success("New app.asar successfully written.")
 
-    # Atualização da integridade no Info.plist
-    if os.path.exists(info_plist_path):
-        log("Atualizando assinatura de integridade ElectronAsarIntegrity no Info.plist...")
+    # macOS Info.plist ElectronAsarIntegrity update
+    if app_paths.info_plist_path and os.path.exists(app_paths.info_plist_path):
+        log("Updating ElectronAsarIntegrity hash in Info.plist...")
         try:
-            with open(info_plist_path, "rb") as f:
+            import plistlib
+
+            with open(app_paths.info_plist_path, "rb") as f:
                 plist = plistlib.load(f)
 
             if "ElectronAsarIntegrity" in plist and "Resources/app.asar" in plist["ElectronAsarIntegrity"]:
                 plist["ElectronAsarIntegrity"]["Resources/app.asar"]["hash"] = new_asar_sha256
-                with open(info_plist_path, "wb") as f:
+                with open(app_paths.info_plist_path, "wb") as f:
                     plistlib.dump(plist, f)
-                log_success("Info.plist atualizado com o novo hash SHA-256.")
+                log_success("Info.plist successfully updated with new SHA-256 integrity hash.")
             else:
-                log_warn("Chave ElectronAsarIntegrity não presente ou com formato diferente.")
+                log_warn("ElectronAsarIntegrity key not present or format mismatch.")
         except Exception as e:
-            log_warn(f"Não foi possível atualizar Info.plist: {e}")
+            log_warn(f"Notice while updating Info.plist: {e}")
 
-    # Re-assinatura de código para conformidade com o macOS Gatekeeper / AMFI
-    log("Re-assinando o bundle com codesign ad-hoc...")
-    try:
-        res = subprocess.run(
-            ["codesign", "--force", "--deep", "-s", "-", app_path],
-            capture_output=True,
-            text=True,
-        )
-        if res.returncode == 0:
-            log_success("Assinatura de código ad-hoc aplicada com sucesso.")
-        else:
-            log_warn(f"Aviso ao assinar com codesign: {res.stderr.strip()}")
-    except Exception as e:
-        log_warn(f"Erro ao executar codesign: {e}")
+    # macOS Gatekeeper / AMFI codesigning
+    if sys.platform == "darwin":
+        log("Re-signing application bundle with ad-hoc codesign...")
+        try:
+            res = subprocess.run(
+                ["codesign", "--force", "--deep", "-s", "-", app_paths.app_root],
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode == 0:
+                log_success("Ad-hoc codesign completed successfully.")
+            else:
+                log_warn(f"Codesign notice: {res.stderr.strip()}")
+        except Exception as e:
+            log_warn(f"Codesign error: {e}")
 
-    print("\n" + "=" * 60)
-    log_success("PATCH APLICADO COM SUCESSO!")
-    print("  • O Antigravity agora salvará automaticamente o tamanho e posição da janela.")
-    print("  • Ao reabrir, a janela retornará exatamente às últimas dimensões utilizadas.")
-    print("  • Backup original preservado em: Contents/Resources/app.asar.orig")
-    print("=" * 60 + "\n")
+    print("\n" + "=" * 62)
+    log_success("PATCH APPLIED SUCCESSFULLY!")
+    print("  • Antigravity will now persist window size, position, and maximized state.")
+    print("  • When reopened, the window will restore exact previous dimensions.")
+    print(f"  • Original backup preserved at: {backup_orig}")
+    print("=" * 62 + "\n")
 
 
-def check_status(app_path: str):
-    """Exibe o status atual do app e do patch."""
-    asar_path = os.path.join(app_path, "Contents", "Resources", "app.asar")
-    log(f"Aplicativo detectado: {app_path}")
+def check_status(app_paths: AppPaths):
+    """Displays current status of the patch on the detected installation."""
+    asar_path = app_paths.asar_path
+    log(f"Detected application: {app_paths.app_root}")
+    log(f"Target ASAR: {asar_path}")
+
     if not os.path.exists(asar_path):
-        log_error("app.asar não encontrado.")
+        log_error("app.asar not found.")
         return
 
     header, payload = parse_asar(asar_path)
@@ -417,101 +586,107 @@ def check_status(app_path: str):
         old_size = utils_entry["size"]
         code = payload[old_offset : old_offset + old_size].decode("utf-8", "ignore")
         if PATCH_MARKER in code:
-            log_success("Status: PATCH ATIVO e funcionando.")
+            log_success("Status: PATCH IS ACTIVE and functioning.")
         else:
-            log_warn("Status: PATCH NÃO APLICADO (janela mantém tamanho padrão 1400x900).")
+            log_warn("Status: PATCH NOT APPLIED (window uses default 1400x900 size).")
     except Exception as e:
-        log_error(f"Erro ao analisar ASAR: {e}")
+        log_error(f"Error inspecting ASAR: {e}")
 
-    backup_orig = os.path.join(app_path, "Contents", "Resources", "app.asar.orig")
+    backup_orig = app_paths.backup_orig
     if os.path.exists(backup_orig):
-        log(f"Backup original existente: {backup_orig}")
+        log(f"Original factory backup present: {backup_orig}")
 
 
-def restore_backup(app_path: str, force_kill: bool = False):
-    """Restaura o backup original do app.asar."""
-    asar_path = os.path.join(app_path, "Contents", "Resources", "app.asar")
-    backup_orig = os.path.join(app_path, "Contents", "Resources", "app.asar.orig")
-    info_plist_path = os.path.join(app_path, "Contents", "Info.plist")
+def restore_backup(app_paths: AppPaths, force_kill: bool = False):
+    """Restores the original stock factory backup of app.asar."""
+    asar_path = app_paths.asar_path
+    backup_orig = app_paths.backup_orig
 
     if not os.path.exists(backup_orig):
-        log_error(f"Nenhum backup original encontrado em: {backup_orig}")
+        log_error(f"No original backup found at: {backup_orig}")
         sys.exit(1)
 
-    if is_app_running(app_path):
+    if is_app_running(app_paths):
         if force_kill:
-            kill_running_app(app_path)
+            kill_running_app(app_paths)
         else:
-            log_warn("O Antigravity está em execução no momento.")
-            resp = input("Deseja fechar o aplicativo para restaurar o backup? [S/n]: ").strip().lower()
-            if resp in ("", "s", "sim", "y", "yes"):
-                kill_running_app(app_path)
+            log_warn("Antigravity is currently running.")
+            if sys.stdin.isatty():
+                resp = input("Do you want to close Antigravity to restore the backup? [y/N]: ").strip().lower()
+                if resp in ("y", "yes", "s", "sim"):
+                    kill_running_app(app_paths)
+                else:
+                    log_error("Operation aborted.")
+                    sys.exit(1)
             else:
-                log_error("Operação cancelada.")
+                log_error("Antigravity is running. Close it or use --kill to restore.")
                 sys.exit(1)
 
-    log(f"Restaurando {backup_orig} -> {asar_path}...")
+    log(f"Restoring {backup_orig} -> {asar_path}...")
     shutil.copy2(backup_orig, asar_path)
 
-    # Restaura hash do backup no Info.plist
-    with open(backup_orig, "rb") as f:
-        orig_sha256 = hashlib.sha256(f.read()).hexdigest()
-
-    if os.path.exists(info_plist_path):
+    # Restore Info.plist on macOS
+    if app_paths.info_plist_path and os.path.exists(app_paths.info_plist_path):
         try:
-            with open(info_plist_path, "rb") as f:
+            import plistlib
+
+            with open(backup_orig, "rb") as f:
+                orig_sha256 = hashlib.sha256(f.read()).hexdigest()
+            with open(app_paths.info_plist_path, "rb") as f:
                 plist = plistlib.load(f)
             if "ElectronAsarIntegrity" in plist and "Resources/app.asar" in plist["ElectronAsarIntegrity"]:
                 plist["ElectronAsarIntegrity"]["Resources/app.asar"]["hash"] = orig_sha256
-                with open(info_plist_path, "wb") as f:
+                with open(app_paths.info_plist_path, "wb") as f:
                     plistlib.dump(plist, f)
-                log_success("Info.plist restaurado.")
+                log_success("Info.plist restored.")
         except Exception as e:
-            log_warn(f"Aviso ao restaurar Info.plist: {e}")
+            log_warn(f"Notice while restoring Info.plist: {e}")
 
-    log("Re-assinando com codesign...")
-    subprocess.run(["codesign", "--force", "--deep", "-s", "-", app_path], check=False)
+    # Re-sign on macOS
+    if sys.platform == "darwin":
+        log("Re-signing with codesign...")
+        subprocess.run(["codesign", "--force", "--deep", "-s", "-", app_paths.app_root], check=False)
 
-    log_success("Restauração concluída com sucesso! O aplicativo voltou ao estado de fábrica.")
+    log_success("Restore complete! Application reverted to factory state.")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Patch para persistir o tamanho da janela do Antigravity no macOS."
+        description="Patch to persist window size and position in Antigravity (macOS & Windows)."
     )
     parser.add_argument(
         "--app",
         type=str,
         default=None,
-        help="Caminho personalizado para o Antigravity.app (opcional).",
+        help="Custom path to Antigravity directory or executable (optional).",
     )
     parser.add_argument(
         "--status",
         action="store_true",
-        help="Verifica se o patch está ativo no app.",
+        help="Check whether the persistence patch is currently active.",
     )
     parser.add_argument(
         "--restore",
         "--undo",
         action="store_true",
-        help="Restaura o app.asar original de fábrica a partir do backup.",
+        help="Restore the original factory app.asar from backup.",
     )
     parser.add_argument(
         "--kill",
         action="store_true",
-        help="Fecha o aplicativo automaticamente sem perguntar se estiver em execução.",
+        help="Automatically terminate Antigravity if it is currently running.",
     )
 
     args = parser.parse_args()
 
-    app_path = find_antigravity_app(args.app)
+    app_paths = find_antigravity_app(args.app)
 
     if args.status:
-        check_status(app_path)
+        check_status(app_paths)
     elif args.restore:
-        restore_backup(app_path, force_kill=args.kill)
+        restore_backup(app_paths, force_kill=args.kill)
     else:
-        apply_patch(app_path, force_kill=args.kill)
+        apply_patch(app_paths, force_kill=args.kill)
 
 
 if __name__ == "__main__":

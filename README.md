@@ -1,39 +1,64 @@
-# Antigravity Window Size Persistence for macOS
+# Antigravity Window Size Persistence (macOS & Windows)
 
-A zero-dependency Python utility to automatically persist and restore the window size, position, and maximized state of **Antigravity.app** on macOS.
+A zero-dependency Python utility to automatically persist and restore the window size, position, and maximized state of Google **Antigravity** on **Windows** and **macOS**.
 
 ---
 
 ## Features
 
-- **Automatic App Detection**: Finds `Antigravity.app` in `/Applications`, `~/Applications`, or via Spotlight (`mdfind`).
-- **Smart Window Persistence**:
-  - Automatically restores previous window dimensions and screen coordinates from `~/Library/Application Support/Antigravity/app_storage.json`.
+- **Cross-Platform Auto-Detection**:
+  - **Windows**: Automatically locates `%LOCALAPPDATA%\Programs\antigravity` and standard Program Files paths.
+  - **macOS**: Automatically locates `/Applications/Antigravity.app`, `~/Applications`, and Spotlight (`mdfind`).
+  - Supports custom installation directories via `--app <path>`.
+- **Smart Window Geometry Persistence**:
+  - Restores previous window dimensions and screen coordinates from `app_storage.json`.
   - Preserves and restores maximized window state across launches.
-  - Multi-monitor safety: repositions the window to an active display if a secondary monitor was disconnected.
+  - Multi-monitor safety: repositions the window safely into view if a secondary monitor was disconnected.
   - Debounced listeners on `resize`, `move`, and `close` events for smooth performance.
-- **Zero External Dependencies**: Built entirely with Python 3 standard library modules (`struct`, `json`, `hashlib`, `plistlib`). No `node`, `npm`, `npx`, or `pip` required.
-- **Safe & Reversible**:
-  - Automatically creates a permanent original backup (`app.asar.orig`) and timestamped backups before modifications.
-  - One-command factory restoration.
-- **macOS & Electron Integrity**:
-  - Updates the SHA-256 hash in `Info.plist` (`ElectronAsarIntegrity`).
-  - Automatically re-signs the bundle with `codesign` to comply with Gatekeeper and AMFI.
+- **Zero External Dependencies**: Built entirely with Python 3 standard library modules (`struct`, `json`, `hashlib`, etc.). No `node`, `npm`, `npx`, or `pip` required.
+- **Safe & Fully Reversible**:
+  - Automatically creates a permanent original backup (`app.asar.orig`) and timestamped rollback backups.
+  - Instant one-command factory restore.
+- **Platform Integrity**:
+  - Updates Electron ASAR integrity hashes (`ElectronAsarIntegrity` in `Info.plist` on macOS).
+  - Automatically re-signs the bundle with `codesign` on macOS for Gatekeeper/AMFI compliance.
 
 ---
 
 ## Quick Start
 
-Open Terminal and run:
+### Windows
+
+Open PowerShell or Command Prompt in the repository folder:
+
+```powershell
+# 1. Check current patch status
+python patch_antigravity_window.py --status
+
+# 2. Apply the patch (prompts if Antigravity is open)
+python patch_antigravity_window.py
+
+# Or apply and close running Antigravity automatically:
+python patch_antigravity_window.py --kill
+```
+
+> **Tip:** You can also run `.\run.bat` or `.\run.ps1`:
+> ```powershell
+> .\run.ps1 --status
+> ```
+
+### macOS
+
+Open Terminal in the repository folder:
 
 ```bash
 # 1. Check current patch status
 python3 patch_antigravity_window.py --status
 
-# 2. Apply the patch (prompts to close Antigravity if running)
+# 2. Apply the patch (prompts if Antigravity is open)
 python3 patch_antigravity_window.py
 
-# Or apply and close Antigravity automatically
+# Or apply and close running Antigravity automatically:
 python3 patch_antigravity_window.py --kill
 ```
 
@@ -51,9 +76,9 @@ python3 patch_antigravity_window.py --kill
 |---|---|
 | *(none)* | Applies the persistence patch to the detected Antigravity installation. |
 | `--status` | Checks whether the patch is installed and active. |
-| `--restore`, `--undo` | Restores the original factory `app.asar` from the backup. |
+| `--restore`, `--undo` | Restores the original stock factory `app.asar` from the backup. |
 | `--kill` | Automatically terminates Antigravity if it is currently running. |
-| `--app <path>` | Specifies a custom path to `Antigravity.app`. |
+| `--app <path>` | Specifies a custom path to Antigravity directory or executable. |
 
 ---
 
@@ -62,6 +87,10 @@ python3 patch_antigravity_window.py --kill
 To revert Antigravity back to its stock factory state at any time:
 
 ```bash
+# Windows
+python patch_antigravity_window.py --restore
+
+# macOS
 python3 patch_antigravity_window.py --restore
 ```
 
