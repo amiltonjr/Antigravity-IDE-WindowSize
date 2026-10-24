@@ -4,10 +4,10 @@
 
 **Cross-platform utility to persist and restore Google Antigravity window geometry across launches.**
 
-[![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-24292e?style=for-the-badge&logo=apple&logoColor=white)](https://github.com)
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Zero Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-2ea44f?style=for-the-badge)](https://python.org)
-[![Author](https://img.shields.io/badge/Author-Amilton%20Camargo%20Junior-blueviolet?style=for-the-badge)](https://comandanteamilton.com.br/)
+<a href="https://github.com" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-24292e?style=for-the-badge&logo=apple&logoColor=white" alt="Platform: macOS | Windows | Linux" /></a>
+<a href="https://python.org" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Python-3.8%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.8+" /></a>
+<a href="https://python.org" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-2ea44f?style=for-the-badge" alt="Zero Dependencies" /></a>
+<a href="https://comandanteamilton.com.br/" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Author-Amilton%20Camargo%20Junior-blueviolet?style=for-the-badge" alt="Author" /></a>
 
 <p align="center">
   <a href="#-overview">Overview</a> •
@@ -107,7 +107,7 @@ python3 patch_antigravity_window.py --restore
 When Google updates Antigravity, the updater overwrites `app.asar`. Simply re-run this script to reapply persistence.
 
 <p align="left">
-  <a href="https://antigravity.google/download">
+  <a href="https://antigravity.google/download" target="_blank" rel="noopener noreferrer">
     <img src="https://img.shields.io/badge/Download-Official%20Google%20Antigravity%20IDE-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Download Official Google Antigravity IDE" />
   </a>
 </p>
@@ -117,4 +117,4 @@ When Google updates Antigravity, the updater overwrites `app.asar`. Simply re-ru
 ## 👤 Author
 
 **Amilton Camargo Junior (Comandante)**
-- 🌐 Website: [comandanteamilton.com.br](https://comandanteamilton.com.br/)
+- 🌐 Website: <a href="https://comandanteamilton.com.br/" target="_blank" rel="noopener noreferrer">comandanteamilton.com.br</a>
