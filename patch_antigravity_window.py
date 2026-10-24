@@ -3,11 +3,11 @@
 """
 Antigravity Window Size Persistence Patch
 ==========================================
-Cross-platform utility (macOS & Windows) to automatically persist and restore
+Cross-platform utility (macOS, Windows & Linux) to automatically persist and restore
 the window size, position, and maximized state of Google Antigravity.
 
 Features:
-- Automatically detects Antigravity installation on macOS and Windows.
+- Automatically detects Antigravity installation on macOS, Windows, and Linux.
 - Injects non-intrusive window persistence into dist/utils.js in app.asar.
 - Automatically handles multi-monitor screen repositioning safety.
 - Manages Electron ASAR integrity and macOS codesigning where applicable.
@@ -94,7 +94,7 @@ def resolve_app_structure(base_path: str) -> AppPaths:
             info_plist_path=plist if os.path.exists(plist) else None,
         )
 
-    # Case 2: Points to an executable binary (e.g., Antigravity.exe)
+    # Case 2: Points to an executable binary (e.g. Antigravity.exe, antigravity)
     if os.path.isfile(p):
         p = os.path.dirname(p)
 
@@ -109,12 +109,12 @@ def resolve_app_structure(base_path: str) -> AppPaths:
             info_plist_path=plist if os.path.exists(plist) else None,
         )
 
-    # Case 4: Windows / standard layout (<app>/resources/app.asar)
-    win_asar = os.path.join(p, "resources", "app.asar")
-    if os.path.exists(win_asar):
+    # Case 4: Windows / Linux standard layout (<app>/resources/app.asar)
+    std_asar = os.path.join(p, "resources", "app.asar")
+    if os.path.exists(std_asar):
         return AppPaths(
             app_root=p,
-            asar_path=win_asar,
+            asar_path=std_asar,
             resources_dir=os.path.join(p, "resources"),
             info_plist_path=None,
         )
@@ -153,18 +153,43 @@ def get_default_candidate_paths() -> list:
             candidates.append(os.path.join(prog_files_x86, "Antigravity"))
             candidates.append(os.path.join(prog_files_x86, "antigravity"))
 
+        # Also check common extracted folders in Downloads
+        downloads_dir = os.path.expanduser("~/Downloads")
+        candidates.extend([
+            os.path.join(downloads_dir, "Antigravity-Linux-x64"),
+            os.path.join(downloads_dir, "antigravity-linux-x64"),
+            os.path.join(downloads_dir, "Antigravity"),
+        ])
+
     elif sys.platform == "darwin":
         candidates.extend([
             "/Applications/Antigravity.app",
             os.path.expanduser("~/Applications/Antigravity.app"),
         ])
     else:
+        # Linux / Unix
         candidates.extend([
             "/opt/Antigravity",
             "/opt/antigravity",
             "/usr/lib/antigravity",
+            "/usr/lib/Antigravity",
+            "/usr/share/antigravity",
+            "/usr/share/Antigravity",
             os.path.expanduser("~/.local/share/antigravity"),
+            os.path.expanduser("~/.local/share/Antigravity"),
+            os.path.expanduser("~/Applications/Antigravity"),
+            os.path.expanduser("~/Applications/antigravity"),
+            os.path.expanduser("~/Downloads/Antigravity-Linux-x64"),
+            os.path.expanduser("~/Downloads/antigravity-linux-x64"),
+            os.path.expanduser("~/Downloads/Antigravity"),
         ])
+
+        # Resolve from PATH if available
+        for bin_name in ["antigravity", "Antigravity"]:
+            which_path = shutil.which(bin_name)
+            if which_path:
+                real_bin = os.path.realpath(which_path)
+                candidates.append(os.path.dirname(real_bin))
 
     return candidates
 
@@ -208,18 +233,35 @@ def find_antigravity_app(custom_path: str = None) -> AppPaths:
 
 
 def is_app_running(app_paths: AppPaths) -> bool:
-    """Checks whether Antigravity is currently running."""
+    """Checks whether the targeted Antigravity installation is currently running."""
     if sys.platform == "win32":
+        exe_path = os.path.join(app_paths.app_root, "Antigravity.exe")
+        if not os.path.exists(exe_path):
+            return False
+
         try:
+            cmd = 'Get-Process Antigravity -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path'
             res = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq Antigravity.exe", "/NH"],
+                ["powershell", "-NoProfile", "-Command", cmd],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            return "antigravity.exe" in res.stdout.lower()
+            running_paths = [line.strip().lower() for line in res.stdout.strip().splitlines() if line.strip()]
+            target_norm = os.path.normpath(exe_path).lower()
+            return any(os.path.normpath(p) == target_norm for p in running_paths)
         except Exception:
-            return False
+            try:
+                res = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq Antigravity.exe", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                return "antigravity.exe" in res.stdout.lower()
+            except Exception:
+                return False
+
     elif sys.platform == "darwin":
         try:
             res = subprocess.run(
@@ -231,9 +273,16 @@ def is_app_running(app_paths: AppPaths) -> bool:
         except Exception:
             return False
     else:
+        # Linux
         try:
-            res = subprocess.run(["pgrep", "-f", "antigravity"], capture_output=True, timeout=5)
-            return res.returncode == 0
+            res = subprocess.run(["pgrep", "-f", f"{app_paths.app_root}/antigravity"], capture_output=True, timeout=5)
+            if res.returncode == 0:
+                return True
+            res_caps = subprocess.run(["pgrep", "-f", f"{app_paths.app_root}/Antigravity"], capture_output=True, timeout=5)
+            if res_caps.returncode == 0:
+                return True
+            res_gen = subprocess.run(["pgrep", "-x", "antigravity"], capture_output=True, timeout=5)
+            return res_gen.returncode == 0
         except Exception:
             return False
 
@@ -254,8 +303,10 @@ def kill_running_app(app_paths: AppPaths):
         except Exception as e:
             log_error(f"Error terminating process: {e}")
     else:
+        # Linux
         try:
             subprocess.run(["pkill", "-f", "antigravity"], check=False)
+            subprocess.run(["pkill", "-f", "Antigravity"], check=False)
             time.sleep(1.5)
         except Exception as e:
             log_error(f"Error terminating process: {e}")
@@ -512,19 +563,25 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
         f"app.asar.backup-{time.strftime('%Y%m%d-%H%M%S')}",
     )
 
-    if not os.path.exists(backup_orig):
-        log(f"Creating permanent original backup at: {backup_orig}")
-        shutil.copy2(asar_path, backup_orig)
+    try:
+        if not os.path.exists(backup_orig):
+            log(f"Creating permanent original backup at: {backup_orig}")
+            shutil.copy2(asar_path, backup_orig)
 
-    log(f"Creating timestamped backup at: {backup_timestamp}")
-    shutil.copy2(asar_path, backup_timestamp)
+        log(f"Creating timestamped backup at: {backup_timestamp}")
+        shutil.copy2(asar_path, backup_timestamp)
 
-    # Atomic file write
-    temp_asar = asar_path + ".tmp"
-    with open(temp_asar, "wb") as f:
-        f.write(new_asar_bytes)
-    os.replace(temp_asar, asar_path)
-    log_success("New app.asar successfully written.")
+        # Atomic file write
+        temp_asar = asar_path + ".tmp"
+        with open(temp_asar, "wb") as f:
+            f.write(new_asar_bytes)
+        os.replace(temp_asar, asar_path)
+        log_success("New app.asar successfully written.")
+    except PermissionError as pe:
+        log_error(f"Permission denied while modifying {asar_path}: {pe}")
+        if sys.platform != "win32":
+            log_error("Please try running the script with elevated permissions (e.g. sudo).")
+        sys.exit(1)
 
     # macOS Info.plist ElectronAsarIntegrity update
     if app_paths.info_plist_path and os.path.exists(app_paths.info_plist_path):
@@ -623,7 +680,13 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False):
                 sys.exit(1)
 
     log(f"Restoring {backup_orig} -> {asar_path}...")
-    shutil.copy2(backup_orig, asar_path)
+    try:
+        shutil.copy2(backup_orig, asar_path)
+    except PermissionError as pe:
+        log_error(f"Permission denied while restoring {asar_path}: {pe}")
+        if sys.platform != "win32":
+            log_error("Please try running the script with elevated permissions (e.g. sudo).")
+        sys.exit(1)
 
     # Restore Info.plist on macOS
     if app_paths.info_plist_path and os.path.exists(app_paths.info_plist_path):
@@ -652,13 +715,13 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Patch to persist window size and position in Antigravity (macOS & Windows)."
+        description="Patch to persist window size and position in Antigravity (macOS, Windows & Linux)."
     )
     parser.add_argument(
         "--app",
         type=str,
         default=None,
-        help="Custom path to Antigravity directory or executable (optional).",
+        help="Custom path to Antigravity directory, binary, or app.asar (optional).",
     )
     parser.add_argument(
         "--status",

@@ -1,12 +1,13 @@
-# Antigravity Window Size Persistence (macOS & Windows)
+# Antigravity Window Size Persistence (macOS, Windows & Linux)
 
-A zero-dependency Python utility to automatically persist and restore the window size, position, and maximized state of Google **Antigravity** on **Windows** and **macOS**.
+A zero-dependency Python utility to automatically persist and restore the window size, position, and maximized state of Google **Antigravity** across **macOS**, **Windows**, and **Linux**.
 
 ---
 
 ## Features
 
 - **Cross-Platform Auto-Detection**:
+  - **Linux**: Automatically locates system and user installs (`/opt/antigravity`, `/usr/lib/antigravity`, `~/.local/share/antigravity`, `PATH`, extracted folders in `~/Downloads`).
   - **Windows**: Automatically locates `%LOCALAPPDATA%\Programs\antigravity` and standard Program Files paths.
   - **macOS**: Automatically locates `/Applications/Antigravity.app`, `~/Applications`, and Spotlight (`mdfind`).
   - Supports custom installation directories via `--app <path>`.
@@ -19,13 +20,36 @@ A zero-dependency Python utility to automatically persist and restore the window
 - **Safe & Fully Reversible**:
   - Automatically creates a permanent original backup (`app.asar.orig`) and timestamped rollback backups.
   - Instant one-command factory restore.
-- **Platform Integrity**:
+- **Platform Integrity & Permissions**:
   - Updates Electron ASAR integrity hashes (`ElectronAsarIntegrity` in `Info.plist` on macOS).
   - Automatically re-signs the bundle with `codesign` on macOS for Gatekeeper/AMFI compliance.
+  - Handles permission checks gracefully on Linux systems.
 
 ---
 
 ## Quick Start
+
+### Linux
+
+Open Terminal in the repository folder:
+
+```bash
+# 1. Check current patch status
+python3 patch_antigravity_window.py --status
+
+# 2. Apply the patch (prompts if Antigravity is open)
+python3 patch_antigravity_window.py
+
+# Or apply and close running Antigravity automatically:
+python3 patch_antigravity_window.py --kill
+```
+
+> **Tip:** You can also use the included shell runner:
+> ```bash
+> chmod +x run.sh
+> ./run.sh --kill
+> ```
+> *Note: If installed in a system directory like `/opt/antigravity`, run with `sudo`.*
 
 ### Windows
 
@@ -78,7 +102,7 @@ python3 patch_antigravity_window.py --kill
 | `--status` | Checks whether the patch is installed and active. |
 | `--restore`, `--undo` | Restores the original stock factory `app.asar` from the backup. |
 | `--kill` | Automatically terminates Antigravity if it is currently running. |
-| `--app <path>` | Specifies a custom path to Antigravity directory or executable. |
+| `--app <path>` | Specifies a custom path to Antigravity directory, binary, or `app.asar`. |
 
 ---
 
@@ -87,6 +111,9 @@ python3 patch_antigravity_window.py --kill
 To revert Antigravity back to its stock factory state at any time:
 
 ```bash
+# Linux
+python3 patch_antigravity_window.py --restore
+
 # Windows
 python patch_antigravity_window.py --restore
 
