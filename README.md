@@ -25,146 +25,70 @@
 
 ## 📖 Overview
 
-By default, **Google Antigravity** resets its main window to a fixed `1400×900` resolution on every launch, ignoring custom layouts, window sizing, and multi-monitor configurations.
+By default, **Google Antigravity** resets its window to `1400×900` on launch. This utility modifies `dist/utils.js` inside `app.asar` to automatically persist:
+- 📐 **Dimensions** (width and height).
+- 📍 **Position** ($x$, $y$) with off-screen multi-monitor safety.
+- 🔲 **Maximized state**.
 
-This utility modifies the internal `dist/utils.js` within Antigravity's `app.asar` archive to automatically persist and restore:
-- 📐 **Exact window dimensions** (width and height).
-- 📍 **Screen coordinates** ($x$, $y$) with intelligent multi-monitor protection.
-- 🔲 **Maximized window state**.
-
-Everything runs directly through the Python 3 standard library with **zero external dependencies** (`npm`, `pip`, or `node` are not required).
+Runs standalone via Python 3 with **zero external dependencies**.
 
 ---
 
 ## ⚙️ How It Works
 
 ```mermaid
-flowchart TD
-    subgraph Step1["1. Discovery & Safety"]
-        A["🔍 Auto-Detect Installation<br/>(macOS / Windows / Linux)"] --> B["💾 Create Original Stock Backup<br/>(app.asar.orig)"]
-    end
-
-    subgraph Step2["2. Non-Intrusive Patch"]
-        B --> C["📦 Unpack ASAR Archive & Header"]
-        C --> D["⚡ Inject Debounced Geometry Handlers<br/>into dist/utils.js"]
-    end
-
-    subgraph Step3["3. Rebuild & Sign"]
-        D --> E["🔨 Rebuild ASAR with Adjusted Offsets"]
-        E --> F["🔐 Update Hashes & Ad-Hoc Sign<br/>(Gatekeeper & AMFI on macOS)"]
-    end
-
-    subgraph Step4["4. Launch"]
-        F --> G["🚀 Antigravity Restores Previous Window Size,<br/>Coordinates & Maximized State"]
-    end
-
-    style Step1 fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px
-    style Step2 fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px
-    style Step3 fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px
-    style Step4 fill:#f6f8fa,stroke:#d0d7de,stroke-width:1px
+flowchart LR
+    A["🔍 Detect App"] --> B["💾 Backup app.asar"] --> C["⚡ Inject Persistence"] --> D["🔨 Rebuild & Sign"] --> E["🚀 Auto-Restore"]
 ```
+
+1. **Auto-detects** Antigravity on macOS, Windows, or Linux.
+2. **Backs up** original `app.asar` (`app.asar.orig`).
+3. **Injects** debounced window geometry handlers into `dist/utils.js`.
+4. **Restores** your exact window layout on every launch.
 
 ---
 
 ## ✨ Features
 
-- 🖥️ **Smart Multi-Monitor Safety**: If a secondary monitor is unplugged or unavailable, the window automatically snaps back into the visible bounds of the primary active display—no off-screen windows.
-- ⏱️ **Debounced State Storage**: State updates write smoothly to Antigravity's native `app_storage.json` with a 250ms debounce on `resize`, `move`, and `close` events, eliminating CPU and disk overhead.
-- 🛡️ **Non-Destructive with Instant Rollback**: Creates a permanent master backup (`app.asar.orig`) plus timestamped snapshots before any modification. You can return to stock factory condition with a single command.
-- 🔏 **Platform Security Compliance**:
-  - **macOS**: Automatically updates the `ElectronAsarIntegrity` block in `Info.plist` and applies ad-hoc codesigning (`codesign --force --deep -s -`) to satisfy Gatekeeper and AMFI.
-  - **Windows**: Handles console encoding (UTF-8), non-blocking process inspection, and atomic file replacements.
-  - **Linux**: Resolves standard system paths (`/opt`, `/usr/lib`, `~/.local`) and provides clear guidance for permission handling (`sudo`).
+- 🖥️ **Multi-Monitor Safe**: If a display is disconnected, the window shifts safely to an active screen.
+- ⏱️ **Debounced Saving**: Geometry writes to native `app_storage.json` without lag (250ms debounce).
+- 🛡️ **Reversible**: Master backup created automatically before patching. Revert anytime with `--restore`.
+- 🔏 **Platform Compliant**: Handles macOS `codesign`/`ElectronAsarIntegrity`, Windows paths, and Linux permissions.
 
 ---
 
 ## 🚀 Quick Start
 
-Choose your operating system below:
-
-### 🐧 Linux
-
-Open Terminal in the repository folder:
+Run from your terminal (use `python` on Windows, `python3` on macOS/Linux):
 
 ```bash
-# 1. Check current patch status
+# Check current status
 python3 patch_antigravity_window.py --status
 
-# 2. Apply the patch (prompts if Antigravity is open)
+# Apply the patch (prompts if Antigravity is running)
 python3 patch_antigravity_window.py
 
-# Or apply and close running Antigravity automatically:
+# Or apply and close Antigravity automatically:
 python3 patch_antigravity_window.py --kill
 ```
 
 > [!TIP]
-> You can also use the included shell runner:
-> ```bash
-> chmod +x run.sh
-> ./run.sh --kill
-> ```
-> *Note: If Antigravity is installed in a system directory like `/opt/antigravity`, run with `sudo`.*
-
----
-
-### 🪟 Windows
-
-Open PowerShell or Command Prompt in the repository folder:
-
-```powershell
-# 1. Check current patch status
-python patch_antigravity_window.py --status
-
-# 2. Apply the patch (prompts if Antigravity is open)
-python patch_antigravity_window.py
-
-# Or apply and close running Antigravity automatically:
-python patch_antigravity_window.py --kill
-```
-
-> [!TIP]
-> You can also use the included batch or PowerShell runners:
-> ```powershell
-> .\run.bat --kill
-> # or
-> .\run.ps1 --kill
-> ```
-
----
-
-### 🍏 macOS
-
-Open Terminal in the repository folder:
-
-```bash
-# 1. Check current patch status
-python3 patch_antigravity_window.py --status
-
-# 2. Apply the patch (prompts if Antigravity is open)
-python3 patch_antigravity_window.py
-
-# Or apply and close running Antigravity automatically:
-python3 patch_antigravity_window.py --kill
-```
-
-> [!TIP]
-> You can also use the included shell runner:
-> ```bash
-> chmod +x run.sh
-> ./run.sh --kill
-> ```
+> **Helper runners:**
+> - **Linux / macOS**: `./run.sh --kill`
+> - **Windows**: `.\run.bat --kill` or `.\run.ps1 --kill`
+> *(If installed in a system directory on Linux like `/opt`, run with `sudo`)*
 
 ---
 
 ## 🛠️ CLI Reference
 
-| Flag / Option | Argument | Description |
+| Option | Argument | Description |
 |---|---|---|
-| *(none)* | — | Applies the window persistence patch to the detected installation. |
-| `--status` | — | Inspects `app.asar` and displays whether the patch is active. |
-| `--restore`, `--undo` | — | Restores the original stock factory `app.asar` from `app.asar.orig`. |
-| `--kill` | — | Automatically closes running instances of Antigravity before patching. |
-| `--app` | `<path>` | Custom path to Antigravity directory, binary executable, or `app.asar`. |
+| *(none)* | — | Applies the persistence patch to the detected installation. |
+| `--status` | — | Checks if the patch is active on `app.asar`. |
+| `--restore`, `--undo` | — | Restores the stock factory `app.asar` from backup. |
+| `--kill` | — | Terminates Antigravity if currently running before patching. |
+| `--app` | `<path>` | Custom path to Antigravity folder, executable, or `app.asar`. |
 
 ---
 
@@ -173,21 +97,15 @@ python3 patch_antigravity_window.py --kill
 To revert Antigravity back to stock factory condition at any time:
 
 ```bash
-# Linux
-python3 patch_antigravity_window.py --restore
-
-# Windows
-python patch_antigravity_window.py --restore
-
-# macOS
 python3 patch_antigravity_window.py --restore
 ```
+*(On Windows, run `python patch_antigravity_window.py --restore` or `.\run.bat --restore`)*
 
 ---
 
 ## 💡 Official Updates
 
-When Google releases a new version of Antigravity (e.g., via automatic background update), the installer will overwrite `app.asar`. Simply run this script again after the update to re-enable window persistence.
+When Google updates Antigravity, the updater overwrites `app.asar`. Simply re-run this script to reapply persistence.
 
 ---
 
@@ -195,4 +113,3 @@ When Google releases a new version of Antigravity (e.g., via automatic backgroun
 
 **Amilton Camargo Junior (Comandante)**
 - 🌐 Website: [comandanteamilton.com.br](https://comandanteamilton.com.br/)
-
