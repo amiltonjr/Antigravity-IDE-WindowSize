@@ -106,6 +106,12 @@ python3 patch_antigravity_window.py --restore
 
 When Google updates Antigravity, the updater overwrites `app.asar`. Simply re-run this script to reapply persistence.
 
+<p align="left">
+  <a href="https://antigravity.google/download">
+    <img src="https://img.shields.io/badge/Download-Official%20Google%20Antigravity%20IDE-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Download Official Google Antigravity IDE" />
+  </a>
+</p>
+
 ---
 
 ## 👤 Author
