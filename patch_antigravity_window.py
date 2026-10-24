@@ -6,6 +6,9 @@ Antigravity Window Size Persistence Patch
 Cross-platform utility (macOS, Windows & Linux) to automatically persist and restore
 the window size, position, and maximized state of Google Antigravity.
 
+Author: Amilton Camargo Junior (Comandante)
+Website: https://comandanteamilton.com.br/
+
 Features:
 - Automatically detects Antigravity installation on macOS, Windows, and Linux.
 - Injects non-intrusive window persistence into dist/utils.js in app.asar.
@@ -14,6 +17,10 @@ Features:
 - Creates master and timestamped backups with instant one-command restore.
 - 100% standalone using Python standard library (no npm, pip, or node needed).
 """
+
+__author__ = "Amilton Camargo Junior (Comandante)"
+__url__ = "https://comandanteamilton.com.br/"
+__version__ = "1.0.0"
 
 import argparse
 import hashlib
@@ -715,7 +722,8 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Patch to persist window size and position in Antigravity (macOS, Windows & Linux)."
+        description="Patch to persist window size and position in Antigravity (macOS, Windows & Linux).",
+        epilog="Author: Amilton Camargo Junior (Comandante) • https://comandanteamilton.com.br/",
     )
     parser.add_argument(
         "--app",

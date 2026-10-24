@@ -7,7 +7,7 @@
 [![Platform: macOS | Windows | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-24292e?style=for-the-badge&logo=apple&logoColor=white)](https://github.com)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-2ea44f?style=for-the-badge)](https://python.org)
-[![Safe Backups](https://img.shields.io/badge/Backups-Automatic%20%26%20Reversible-blue?style=for-the-badge)](https://github.com)
+[![Author](https://img.shields.io/badge/Author-Amilton%20Camargo%20Junior-blueviolet?style=for-the-badge)](https://comandanteamilton.com.br/)
 
 <p align="center">
   <a href="#-overview">Overview</a> •
@@ -15,7 +15,8 @@
   <a href="#-features">Features</a> •
   <a href="#-quick-start">Quick Start</a> •
   <a href="#-cli-reference">CLI Reference</a> •
-  <a href="#-restoring-factory-state">Restoration</a>
+  <a href="#-restoring-factory-state">Restoration</a> •
+  <a href="#-author">Author</a>
 </p>
 
 </div>
@@ -187,3 +188,11 @@ python3 patch_antigravity_window.py --restore
 ## 💡 Official Updates
 
 When Google releases a new version of Antigravity (e.g., via automatic background update), the installer will overwrite `app.asar`. Simply run this script again after the update to re-enable window persistence.
+
+---
+
+## 👤 Author
+
+**Amilton Camargo Junior (Comandante)**
+- 🌐 Website: [comandanteamilton.com.br](https://comandanteamilton.com.br/)
+
