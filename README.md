@@ -73,10 +73,9 @@ python3 patch_antigravity_window.py --kill
 ```
 
 > [!TIP]
-> **Helper runners:**
-> - **Linux / macOS**: `./run.sh --kill`
-> - **Windows**: `.\run.bat --kill` or `.\run.ps1 --kill`
-> *(If installed in a system directory on Linux like `/opt`, run with `sudo`)*
+> **Convenience runners:**
+> - **Windows**: `.\run.bat --kill` *(or `.\run.ps1 --kill` in PowerShell)*
+> - **Linux / macOS**: `./run.sh --kill` *(use `sudo ./run.sh` only if installed in a system directory like `/opt`)*
 
 ---
 
