@@ -14,13 +14,13 @@ Features:
 - Injects non-intrusive window persistence into dist/utils.js in app.asar.
 - Automatically handles multi-monitor screen repositioning safety.
 - Manages Electron ASAR integrity and macOS codesigning where applicable.
-- Creates master and timestamped backups with instant one-command restore.
+- Intelligent backup and restore: prevents accidental downgrade when app updates.
 - 100% standalone using Python standard library (no npm, pip, or node needed).
 """
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import argparse
 import hashlib
@@ -80,6 +80,7 @@ class AppPaths:
         self.resources_dir = resources_dir
         self.info_plist_path = info_plist_path
         self.backup_orig = os.path.join(resources_dir, "app.asar.orig")
+        self.patch_info_path = os.path.join(resources_dir, "app.asar.patch_info.json")
 
 
 def resolve_app_structure(base_path: str) -> AppPaths:
@@ -148,6 +149,7 @@ def get_default_candidate_paths() -> list:
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
             candidates.append(os.path.join(local_app_data, "Programs", "antigravity"))
+            candidates.append(os.path.join(local_app_data, "Programs", "Antigravity"))
         candidates.append(os.path.expanduser("~/AppData/Local/Programs/antigravity"))
 
         prog_files = os.environ.get("ProgramFiles")
@@ -351,6 +353,18 @@ def parse_asar(asar_path: str):
     return header, payload
 
 
+def extract_app_version_from_asar(header: dict, payload: bytes) -> str:
+    """Extracts application version from package.json within ASAR payload."""
+    try:
+        pkg_entry = header["files"]["package.json"]
+        offset = int(pkg_entry["offset"])
+        size = pkg_entry["size"]
+        pkg = json.loads(payload[offset : offset + size].decode("utf-8"))
+        return pkg.get("version", "unknown")
+    except Exception:
+        return "unknown"
+
+
 def build_asar(header: dict, payload: bytes) -> bytes:
     """Builds a complete ASAR binary from JSON header dict and raw payload."""
     json_bytes = json.dumps(header, separators=(",", ":")).encode("utf-8")
@@ -365,6 +379,35 @@ def build_asar(header: dict, payload: bytes) -> bytes:
         + (b"\x00" * pad_len)
     )
     return header_bytes + payload
+
+
+def load_patch_info(app_paths: AppPaths) -> dict:
+    """Loads recorded patch metadata if present."""
+    if os.path.exists(app_paths.patch_info_path):
+        try:
+            with open(app_paths.patch_info_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+
+def save_patch_info(app_paths: AppPaths, info: dict):
+    """Saves patch metadata to record hashes and version info."""
+    try:
+        with open(app_paths.patch_info_path, "w", encoding="utf-8") as f:
+            json.dump(info, f, indent=2)
+    except Exception as e:
+        log_warn(f"Notice: Could not save patch metadata: {e}")
+
+
+def remove_patch_info(app_paths: AppPaths):
+    """Removes recorded patch metadata upon restoration."""
+    if os.path.exists(app_paths.patch_info_path):
+        try:
+            os.remove(app_paths.patch_info_path)
+        except Exception:
+            pass
 
 
 def generate_patched_utils_js(original_code: str) -> str:
@@ -517,6 +560,8 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
 
     log(f"Unpacking and reading ASAR: {asar_path}")
     header, payload = parse_asar(asar_path)
+    app_version = extract_app_version_from_asar(header, payload)
+    log(f"Detected Antigravity version: {app_version}")
 
     try:
         utils_entry = header["files"]["dist"]["files"]["utils.js"]
@@ -563,7 +608,7 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
     new_asar_bytes = build_asar(header, new_payload)
     new_asar_sha256 = hashlib.sha256(new_asar_bytes).hexdigest()
 
-    # Safety backups
+    # Safety backups and version tracking
     backup_orig = app_paths.backup_orig
     backup_timestamp = os.path.join(
         app_paths.resources_dir,
@@ -571,7 +616,21 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
     )
 
     try:
-        if not os.path.exists(backup_orig):
+        with open(asar_path, "rb") as f:
+            current_clean_hash = hashlib.sha256(f.read()).hexdigest()
+
+        # Check if backup_orig already exists from an older version
+        if os.path.exists(backup_orig):
+            with open(backup_orig, "rb") as f:
+                old_backup_hash = hashlib.sha256(f.read()).hexdigest()
+            if old_backup_hash != current_clean_hash:
+                log_warn("Detected a newly updated stock Antigravity installation!")
+                prev_backup = f"{backup_orig}.prev-{time.strftime('%Y%m%d-%H%M%S')}"
+                log(f"Archiving previous backup to: {prev_backup}")
+                shutil.copy2(backup_orig, prev_backup)
+                log(f"Updating master factory backup to current stock version: {backup_orig}")
+                shutil.copy2(asar_path, backup_orig)
+        else:
             log(f"Creating permanent original backup at: {backup_orig}")
             shutil.copy2(asar_path, backup_orig)
 
@@ -584,6 +643,19 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
             f.write(new_asar_bytes)
         os.replace(temp_asar, asar_path)
         log_success("New app.asar successfully written.")
+
+        # Save patch metadata to protect against accidental downgrade on restore
+        save_patch_info(
+            app_paths,
+            {
+                "patcher_version": __version__,
+                "patch_marker": PATCH_MARKER,
+                "app_version": app_version,
+                "original_asar_sha256": current_clean_hash,
+                "patched_asar_sha256": new_asar_sha256,
+                "patched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
     except PermissionError as pe:
         log_error(f"Permission denied while modifying {asar_path}: {pe}")
         if sys.platform != "win32":
@@ -625,6 +697,11 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
         except Exception as e:
             log_warn(f"Codesign error: {e}")
 
+        print("\n\033[1;33m[i] macOS Ad-Hoc Signing Notice:\033[0m")
+        print("  • The app was re-signed ad-hoc so macOS Gatekeeper allows running modified ASAR.")
+        print("  • If macOS Keychain prompts for password access on first launch, click 'Always Allow'.")
+        print("  • Background auto-updater may be overwritten or require manual update on new releases.")
+
     print("\n" + "=" * 62)
     log_success("PATCH APPLIED SUCCESSFULLY!")
     print("  • Antigravity will now persist window size, position, and maximized state.")
@@ -644,31 +721,110 @@ def check_status(app_paths: AppPaths):
         return
 
     header, payload = parse_asar(asar_path)
+    app_version = extract_app_version_from_asar(header, payload)
+    log(f"Antigravity Version: {app_version}")
+
+    patch_info = load_patch_info(app_paths)
+    is_patched = False
     try:
         utils_entry = header["files"]["dist"]["files"]["utils.js"]
         old_offset = int(utils_entry["offset"])
         old_size = utils_entry["size"]
         code = payload[old_offset : old_offset + old_size].decode("utf-8", "ignore")
         if PATCH_MARKER in code:
-            log_success("Status: PATCH IS ACTIVE and functioning.")
-        else:
-            log_warn("Status: PATCH NOT APPLIED (window uses default 1400x900 size).")
+            is_patched = True
     except Exception as e:
         log_error(f"Error inspecting ASAR: {e}")
+
+    if is_patched:
+        log_success("Status: PATCH IS ACTIVE and functioning.")
+        if patch_info and patch_info.get("patched_at"):
+            log(f"Patched at: {patch_info['patched_at']}")
+    else:
+        log_warn("Status: PATCH NOT APPLIED (window uses default 1400x900 size).")
+        if patch_info and patch_info.get("app_version") and patch_info["app_version"] != app_version:
+            log_warn(
+                f"Notice: App was previously patched on version {patch_info['app_version']}, "
+                f"but has since been officially updated to {app_version}."
+            )
+            log("Run without arguments to apply persistence to this new version.")
 
     backup_orig = app_paths.backup_orig
     if os.path.exists(backup_orig):
         log(f"Original factory backup present: {backup_orig}")
 
 
-def restore_backup(app_paths: AppPaths, force_kill: bool = False):
-    """Restores the original stock factory backup of app.asar."""
+def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = False):
+    """Restores the original stock factory backup of app.asar safely."""
     asar_path = app_paths.asar_path
     backup_orig = app_paths.backup_orig
 
     if not os.path.exists(backup_orig):
         log_error(f"No original backup found at: {backup_orig}")
         sys.exit(1)
+
+    if not os.path.exists(asar_path):
+        log_error(f"app.asar not found at: {asar_path}")
+        sys.exit(1)
+
+    # Read current ASAR and backup hashes
+    with open(asar_path, "rb") as f:
+        current_bytes = f.read()
+    current_sha256 = hashlib.sha256(current_bytes).hexdigest()
+
+    with open(backup_orig, "rb") as f:
+        orig_bytes = f.read()
+    orig_sha256 = hashlib.sha256(orig_bytes).hexdigest()
+
+    # Check 1: Already original stock?
+    if current_sha256 == orig_sha256:
+        log_warn("The application is already running the stock original ASAR. No restoration needed.")
+        remove_patch_info(app_paths)
+        return
+
+    # Check 2: Check if current ASAR has patch marker
+    current_is_patched = False
+    try:
+        curr_header, curr_payload = parse_asar(asar_path)
+        utils_entry = curr_header["files"]["dist"]["files"]["utils.js"]
+        curr_utils_code = curr_payload[
+            int(utils_entry["offset"]) : int(utils_entry["offset"]) + utils_entry["size"]
+        ].decode("utf-8", "ignore")
+        if PATCH_MARKER in curr_utils_code:
+            current_is_patched = True
+    except Exception:
+        pass
+
+    # Check 3: Has Antigravity updated since the patch was applied?
+    patch_info = load_patch_info(app_paths)
+    if patch_info:
+        expected_patched_hash = patch_info.get("patched_asar_sha256")
+        if expected_patched_hash and current_sha256 != expected_patched_hash and not current_is_patched:
+            log_warn("=" * 64)
+            log_warn("DETECTED OFFICIAL UPDATE: app.asar has been replaced by an Antigravity update!")
+            log_warn(
+                f"Patch was recorded for version {patch_info.get('app_version', 'unknown')}, "
+                "but current app.asar is a new unpatched version."
+            )
+            log_error(
+                "Restoring app.asar.orig would DOWNGRADE your installation and overwrite the new update!"
+            )
+            log_warn("=" * 64)
+            if not force:
+                log_error("Aborting restore for safety. Use --force to override if you genuinely wish to downgrade.")
+                sys.exit(1)
+            else:
+                log_warn("Proceeding with restore due to --force flag.")
+    elif not current_is_patched:
+        log_warn("=" * 64)
+        log_warn("Current app.asar is not patched. It may have been installed by a new official update.")
+        log_error("Restoring app.asar.orig could downgrade your app from a newer version!")
+        log_warn("=" * 64)
+        if not force:
+            log_error("Aborting restore for safety. Use --force to override if you genuinely wish to downgrade.")
+            sys.exit(1)
+        else:
+            log_warn("Proceeding with restore due to --force flag.")
 
     if is_app_running(app_paths):
         if force_kill:
@@ -689,6 +845,7 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False):
     log(f"Restoring {backup_orig} -> {asar_path}...")
     try:
         shutil.copy2(backup_orig, asar_path)
+        remove_patch_info(app_paths)
     except PermissionError as pe:
         log_error(f"Permission denied while restoring {asar_path}: {pe}")
         if sys.platform != "win32":
@@ -743,6 +900,12 @@ def main():
         help="Restore the original factory app.asar from backup.",
     )
     parser.add_argument(
+        "--force",
+        "--force-restore",
+        action="store_true",
+        help="Force restore even if an official application update was detected.",
+    )
+    parser.add_argument(
         "--kill",
         action="store_true",
         help="Automatically terminate Antigravity if it is currently running.",
@@ -755,7 +918,7 @@ def main():
     if args.status:
         check_status(app_paths)
     elif args.restore:
-        restore_backup(app_paths, force_kill=args.kill)
+        restore_backup(app_paths, force_kill=args.kill, force=args.force)
     else:
         apply_patch(app_paths, force_kill=args.kill)
 
