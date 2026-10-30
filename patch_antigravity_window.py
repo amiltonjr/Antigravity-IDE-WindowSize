@@ -361,25 +361,90 @@ def is_app_running(app_paths: AppPaths) -> bool:
             return False
     else:
         # Linux
+        return len(get_running_app_pids(app_paths)) > 0
+
+
+def get_running_app_pids(app_paths: AppPaths) -> list:
+    """Returns a list of PIDs belonging to the running Antigravity application."""
+    if not app_paths:
+        return []
+    pids = []
+    my_pid = os.getpid()
+
+    if sys.platform == "win32":
         try:
-            for bin_name in ["antigravity-ide", "antigravity", "Antigravity"]:
-                res = subprocess.run(["pgrep", "-f", f"{app_paths.app_root}/{bin_name}"], capture_output=True, timeout=5)
-                if res.returncode == 0:
-                    return True
-                res_bin = subprocess.run(["pgrep", "-f", f"{app_paths.app_root}/bin/{bin_name}"], capture_output=True, timeout=5)
-                if res_bin.returncode == 0:
-                    return True
-            for bin_name in ["antigravity-ide", "antigravity", "Antigravity"]:
-                res_gen = subprocess.run(["pgrep", "-x", bin_name], capture_output=True, timeout=5)
-                if res_gen.returncode == 0:
-                    return True
-            return False
+            res = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Antigravity.exe", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in res.stdout.strip().splitlines():
+                parts = line.split('","')
+                if len(parts) >= 2:
+                    pid_str = parts[1].replace('"', "").strip()
+                    if pid_str.isdigit() and int(pid_str) != my_pid:
+                        pids.append(int(pid_str))
         except Exception:
-            return False
+            pass
+    elif sys.platform == "darwin":
+        try:
+            bin_target = f"{app_paths.app_root}/Contents/MacOS/Antigravity"
+            res = subprocess.run(["pgrep", "-f", bin_target], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout:
+                for line in res.stdout.strip().split():
+                    if line.isdigit() and int(line) != my_pid:
+                        pids.append(int(line))
+        except Exception:
+            pass
+    else:
+        # Linux: Inspect /proc for exact binary paths inside app_root
+        app_root_real = os.path.realpath(app_paths.app_root)
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                pid = int(entry)
+                if pid in (my_pid, 1):
+                    continue
+                try:
+                    exe_path = os.path.realpath(os.path.join("/proc", entry, "exe"))
+                    if exe_path.startswith(app_root_real):
+                        pids.append(pid)
+                        continue
+                    with open(os.path.join("/proc", entry, "cmdline"), "rb") as f:
+                        cmdline = f.read().decode("utf-8", "ignore")
+                    if (app_root_real in cmdline or app_paths.app_root in cmdline) and "patch_antigravity" not in cmdline:
+                        pids.append(pid)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    return pids
+
+
+def is_running_inside_app(app_paths: AppPaths) -> bool:
+    """Checks if the current Python script is running as a child or descendant of Antigravity."""
+    if sys.platform != "linux" or not app_paths:
+        return False
+    app_pids = set(get_running_app_pids(app_paths))
+    curr = os.getppid()
+    visited = set()
+    while curr > 1 and curr not in visited:
+        visited.add(curr)
+        if curr in app_pids:
+            return True
+        try:
+            with open(f"/proc/{curr}/stat", "r") as f:
+                parts = f.read().split()
+                curr = int(parts[3])
+        except Exception:
+            break
+    return False
 
 
 def kill_running_app(app_paths: AppPaths):
-    """Terminates running instances of Antigravity."""
+    """Terminates running instances of Antigravity safely."""
     log_warn("Closing running Antigravity processes...")
     if sys.platform == "win32":
         try:
@@ -392,13 +457,29 @@ def kill_running_app(app_paths: AppPaths):
         except Exception as e:
             log_error(f"Error terminating process: {e}")
     else:
-        # Linux
-        try:
-            subprocess.run(["pkill", "-f", "antigravity-ide"], check=False)
-            subprocess.run(["pkill", "-f", "antigravity"], check=False)
-            subprocess.run(["pkill", "-f", "Antigravity"], check=False)
-        except Exception as e:
-            log_error(f"Error terminating process: {e}")
+        # Linux: Terminate targeted PIDs directly without pkill to avoid self-termination
+        import signal
+        pids = get_running_app_pids(app_paths)
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                log_warn(f"Notice while terminating PID {pid}: {e}")
+
+        for _ in range(10):
+            remaining = get_running_app_pids(app_paths)
+            if not remaining:
+                break
+            time.sleep(0.3)
+
+        remaining = get_running_app_pids(app_paths)
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
 
     # Ensure processes have completely exited and released file locks across all platforms
     for _ in range(10):
@@ -406,6 +487,34 @@ def kill_running_app(app_paths: AppPaths):
             break
         time.sleep(0.5)
     time.sleep(1.0 if sys.platform == "win32" else 0.5)
+
+
+def safe_copy_tree(src_dir: str, dst_dir: str):
+    """Recursively copies src_dir into dst_dir, unlinking existing files first.
+
+    Unlinking existing files first avoids ETXTBSY on Linux when updating binaries or
+    shared libraries that are currently open/mapped in memory.
+    """
+    for root, dirs, files in os.walk(src_dir):
+        rel_path = os.path.relpath(root, src_dir)
+        target_dir = dst_dir if rel_path == "." else os.path.join(dst_dir, rel_path)
+        os.makedirs(target_dir, exist_ok=True)
+        for f in files:
+            src_file = os.path.join(root, f)
+            dst_file = os.path.join(target_dir, f)
+            if os.path.islink(dst_file) or os.path.exists(dst_file):
+                try:
+                    os.unlink(dst_file)
+                except Exception:
+                    try:
+                        os.remove(dst_file)
+                    except Exception:
+                        pass
+            if os.path.islink(src_file):
+                link_target = os.readlink(src_file)
+                os.symlink(link_target, dst_file)
+            else:
+                shutil.copy2(src_file, dst_file)
 
 
 def compute_electron_integrity(data: bytes) -> dict:
@@ -1150,6 +1259,20 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
 
         update_file = dest_file
 
+    if update_file and update_version == "latest" and update_file.lower().endswith((".tar.gz", ".tgz", ".tar")):
+        try:
+            import tarfile
+            with tarfile.open(update_file, "r:*") as tf:
+                for member in tf.getmembers():
+                    if member.name.endswith("resources/app/product.json"):
+                        f = tf.extractfile(member)
+                        if f:
+                            pdata = json.load(f)
+                            update_version = pdata.get("ideVersion") or pdata.get("productVersion") or "latest"
+                            break
+        except Exception:
+            pass
+
     # Check if this pending version is ALREADY installed
     current_installed_ver = None
     if app_paths.asar_path and os.path.exists(app_paths.asar_path):
@@ -1183,21 +1306,43 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
     log(f"Found update package: v{update_version} ({update_file})")
 
     if is_app_running(app_paths):
-        if not force_kill:
-            log_warn("Antigravity is currently running. It must be closed to apply the update.")
-            if sys.stdin.isatty():
-                try:
-                    ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
-                    if ans and ans not in ("y", "yes", "s", "sim"):
-                        log_error("Update cancelled by user.")
-                        return
-                except (EOFError, KeyboardInterrupt):
-                    log_error("\nUpdate cancelled.")
-                    return
+        # On Linux, check if the updater is being run from inside Antigravity itself
+        if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
+            log_warn("Antigravity is currently running (updater launched from inside its integrated terminal).")
+            log("Applying update in-place safely without terminating current session...")
+            log("Please restart Antigravity IDE after the update completes to load the new version.")
+        else:
+            if not force_kill:
+                log_warn("Antigravity is currently running. It must be closed to apply the update.")
+                if sys.platform.startswith("linux"):
+                    if sys.stdin.isatty():
+                        try:
+                            ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
+                            if ans and ans not in ("y", "yes", "s", "sim"):
+                                log("Applying update in-place without closing. Please restart Antigravity IDE when done.")
+                            else:
+                                kill_running_app(app_paths)
+                        except (EOFError, KeyboardInterrupt):
+                            log_error("\nUpdate cancelled.")
+                            return
+                    else:
+                        log("Applying update in-place safely without closing. Please restart Antigravity IDE when done.")
+                else:
+                    if sys.stdin.isatty():
+                        try:
+                            ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
+                            if ans and ans not in ("y", "yes", "s", "sim"):
+                                log_error("Update cancelled by user.")
+                                return
+                            kill_running_app(app_paths)
+                        except (EOFError, KeyboardInterrupt):
+                            log_error("\nUpdate cancelled.")
+                            return
+                    else:
+                        log_error("Antigravity is running. Close it or use --kill to automatically terminate it before updating.")
+                        sys.exit(1)
             else:
-                log_error("Antigravity is running. Close it or use --kill to automatically terminate it before updating.")
-                sys.exit(1)
-        kill_running_app(app_paths)
+                kill_running_app(app_paths)
 
     temp_dir = tempfile.mkdtemp(prefix="antigravity_update_")
     try:
@@ -1313,6 +1458,11 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
             # Linux
             if update_file.lower().endswith(".appimage"):
                 log(f"Replacing AppImage at {app_paths.app_root}...")
+                if os.path.exists(app_paths.app_root):
+                    try:
+                        os.unlink(app_paths.app_root)
+                    except Exception:
+                        pass
                 shutil.copy2(update_file, app_paths.app_root)
                 os.chmod(app_paths.app_root, 0o755)
             elif update_file.lower().endswith((".tar.gz", ".tgz", ".tar")):
@@ -1324,18 +1474,8 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                     source_dir = os.path.join(temp_dir, extracted_items[0])
                 else:
                     source_dir = temp_dir
-                for item in os.listdir(source_dir):
-                    s = os.path.join(source_dir, item)
-                    d = os.path.join(app_paths.app_root, item)
-                    if os.path.isdir(s):
-                        shutil.copytree(s, d, dirs_exist_ok=True)
-                    else:
-                        if os.path.exists(d):
-                            try:
-                                os.remove(d)
-                            except Exception:
-                                pass
-                        shutil.copy2(s, d)
+                log(f"Installing update files into {app_paths.app_root}...")
+                safe_copy_tree(source_dir, app_paths.app_root)
             else:
                 with zipfile.ZipFile(update_file, "r") as zf:
                     zf.extractall(temp_dir)
@@ -1344,18 +1484,8 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                     source_dir = os.path.join(temp_dir, extracted_items[0])
                 else:
                     source_dir = temp_dir
-                for item in os.listdir(source_dir):
-                    s = os.path.join(source_dir, item)
-                    d = os.path.join(app_paths.app_root, item)
-                    if os.path.isdir(s):
-                        shutil.copytree(s, d, dirs_exist_ok=True)
-                    else:
-                        if os.path.exists(d):
-                            try:
-                                os.remove(d)
-                            except Exception:
-                                pass
-                        shutil.copy2(s, d)
+                log(f"Installing update files into {app_paths.app_root}...")
+                safe_copy_tree(source_dir, app_paths.app_root)
 
             # Ensure executable permissions for Linux binaries
             for bin_name in ("antigravity-ide", "antigravity", "Antigravity", "chrome_crashpad_handler", "chrome-sandbox"):
@@ -1375,26 +1505,50 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                         except Exception:
                             pass
 
-            try:
-                if os.path.isfile(update_file):
-                    os.remove(update_file)
-                shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
-            except Exception:
-                pass
-
-        log_success(f"Official update v{update_version} installed successfully!")
+        log_success(f"Official update v{update_version} files installed successfully!")
 
     finally:
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    # Clean up all pending updater caches across candidate paths
+    log("Cleaning up updater cache...")
+    try:
+        if os.path.isfile(update_file):
+            os.remove(update_file)
+        shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
+    except Exception:
+        pass
+
+    for cdir in [
+        os.path.expanduser("~/.cache/com.google.antigravity/pending"),
+        os.path.expanduser("~/.cache/antigravity-updater/pending"),
+        os.path.expanduser("~/.cache/antigravity-ide-updater/pending"),
+        os.path.expanduser("~/.cache/Antigravity IDE/pending"),
+        os.path.expanduser("~/.config/Antigravity IDE/pending"),
+        os.path.expanduser("~/.config/antigravity-ide/pending"),
+    ]:
+        if os.path.exists(cdir):
+            try:
+                shutil.rmtree(cdir, ignore_errors=True)
+            except Exception:
+                pass
+
     # Re-apply persistence patch to the fresh install
     log("Applying window persistence patch to new installation...")
     new_app_paths = find_antigravity_app(app_paths.app_root)
-    apply_patch(new_app_paths, force_kill=True)
+    apply_patch(new_app_paths, force_kill=False)
     if sys.platform.startswith("linux"):
         ensure_linux_desktop_entry(new_app_paths)
-    log_success(f"All set! Antigravity is now updated to v{update_version} with window persistence active.")
+
+    final_ver = (
+        extract_app_version_from_dir(new_app_paths.app_dir)
+        if new_app_paths.is_unpacked
+        else update_version
+    )
+    log_success(f"All set! Antigravity is now updated to v{final_ver} with window persistence active.")
+    if is_app_running(new_app_paths):
+        log("\033[1;33m[!] Notice: Antigravity is currently running. Please restart the application to launch the newly installed version.\033[0m")
 
 
 def ensure_linux_desktop_entry(app_paths: AppPaths, force: bool = False) -> bool:
