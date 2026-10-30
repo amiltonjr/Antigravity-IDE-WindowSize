@@ -1079,7 +1079,7 @@ def find_pending_update() -> tuple:
                         with open(c, "rb") as ef:
                             data = ef.read()
                         m = re.search(
-                            b'(?:P\x00r\x00o\x00d\x00u\x00c\x00t\x00|F\x00i\x00l\x00e\x00)V\x00e\x00r\x00s\x00i\x00o\x00n\x00\x00\x00((?:[0-9\.]\x00)+)',
+                            rb'(?:P\x00r\x00o\x00d\x00u\x00c\x00t\x00|F\x00i\x00l\x00e\x00)V\x00e\x00r\x00s\x00i\x00o\x00n\x00\x00\x00((?:[0-9.]\x00)+)',
                             data,
                         )
                         if m:
@@ -2165,6 +2165,8 @@ def main():
     # On Linux, ensure the desktop shortcut and application menu entry exist
     if sys.platform.startswith("linux"):
         ensure_linux_desktop_entry(app_paths, force=args.shortcut)
+    elif args.shortcut:
+        log_warn("The --shortcut option is only applicable on Linux desktop environments.")
 
     if args.shortcut:
         return
