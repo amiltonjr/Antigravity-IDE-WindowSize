@@ -20,18 +20,26 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import argparse
+import ast
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.request
+import zipfile
 from pathlib import Path
+
+GITHUB_REPO_URL = "https://github.com/amiltonjr/Antigravity-IDE-WindowSize"
+GITHUB_RAW_SCRIPT_URL = "https://raw.githubusercontent.com/amiltonjr/Antigravity-IDE-WindowSize/master/patch_antigravity_window.py"
 
 # Enable UTF-8 encoding and ANSI color sequences on Windows console
 if sys.platform == "win32":
@@ -710,6 +718,275 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
     print("=" * 62 + "\n")
 
 
+def find_pending_update() -> tuple:
+    """Finds any pending official update package downloaded by Antigravity in local cache.
+
+    Returns (path_to_update, version_string) or (None, None).
+    """
+    candidates = []
+    if sys.platform == "darwin":
+        candidates.append(os.path.expanduser("~/Library/Caches/com.google.antigravity/pending/Antigravity.zip"))
+    elif sys.platform == "win32":
+        search_dirs = [
+            os.path.expandvars(r"%LOCALAPPDATA%\com.google.antigravity\pending"),
+            os.path.expandvars(r"%LOCALAPPDATA%\antigravity-updater\pending"),
+        ]
+        for sdir in search_dirs:
+            if os.path.isdir(sdir):
+                for f in os.listdir(sdir):
+                    if f.lower().endswith((".zip", ".exe")):
+                        candidates.append(os.path.join(sdir, f))
+    else:
+        search_dirs = [
+            os.path.expanduser("~/.cache/com.google.antigravity/pending"),
+            os.path.expanduser("~/.cache/antigravity-updater/pending"),
+        ]
+        for sdir in search_dirs:
+            if os.path.isdir(sdir):
+                for f in os.listdir(sdir):
+                    if f.lower().endswith((".zip", ".tar.gz", ".appimage")):
+                        candidates.append(os.path.join(sdir, f))
+
+    for c in candidates:
+        if os.path.isfile(c) and os.path.getsize(c) > 5 * 1024 * 1024:
+            version = "latest"
+            if sys.platform == "darwin":
+                try:
+                    import plistlib
+                    with zipfile.ZipFile(c, "r") as zf:
+                        plist_data = zf.read("Antigravity.app/Contents/Info.plist")
+                        plist = plistlib.loads(plist_data)
+                        version = plist.get("CFBundleShortVersionString", "latest")
+                except Exception:
+                    pass
+            info_json = os.path.join(os.path.dirname(c), "update-info.json")
+            if version == "latest" and os.path.isfile(info_json):
+                try:
+                    with open(info_json, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if "version" in data:
+                            version = data["version"]
+                except Exception:
+                    pass
+            return c, version
+    return None, None
+
+
+def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
+    """Applies a pending official update and automatically reapplies the window persistence patch."""
+    update_file, update_version = find_pending_update()
+    if not update_file:
+        log_warn("No pending official update found in local updater cache.")
+        log("If Antigravity recently notified you of an update, ensure it has finished downloading.")
+        log("You can also download the latest version directly from https://antigravity.google/download")
+        return
+
+    log(f"Found pending update: v{update_version} ({update_file})")
+
+    if is_app_running(app_paths):
+        if not force_kill:
+            log_warn("Antigravity is currently running. It must be closed to apply the update.")
+            try:
+                ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
+                if ans and ans != "y" and ans != "yes":
+                    log_error("Update cancelled by user.")
+                    return
+            except (EOFError, KeyboardInterrupt):
+                log_error("\nUpdate cancelled.")
+                return
+        kill_running_app(app_paths)
+
+    temp_dir = tempfile.mkdtemp(prefix="antigravity_update_")
+    try:
+        log(f"Extracting official update package v{update_version}...")
+        if sys.platform == "darwin":
+            # ditto preserves Mach-O execution permissions, symlinks, and Apple code signature
+            res = subprocess.run(["ditto", "-xk", update_file, temp_dir], capture_output=True, text=True)
+            if res.returncode != 0:
+                log_error(f"Failed to extract update package: {res.stderr}")
+                return
+            new_app = os.path.join(temp_dir, "Antigravity.app")
+            if not os.path.exists(new_app):
+                log_error(f"Extracted bundle Antigravity.app not found in {temp_dir}")
+                return
+
+            log(f"Installing new version to {app_paths.app_root}...")
+            target_app = app_paths.app_root
+            backup_temp = target_app + ".old"
+            if os.path.exists(backup_temp):
+                shutil.rmtree(backup_temp, ignore_errors=True)
+
+            os.rename(target_app, backup_temp)
+            try:
+                shutil.move(new_app, target_app)
+                shutil.rmtree(backup_temp, ignore_errors=True)
+            except Exception as e:
+                log_error(f"Failed to install new bundle: {e}")
+                if os.path.exists(backup_temp):
+                    os.rename(backup_temp, target_app)
+                return
+
+            # Clean up pending updater caches
+            try:
+                shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
+                shipit_cache = os.path.expanduser("~/Library/Caches/com.google.antigravity.ShipIt")
+                if os.path.exists(shipit_cache):
+                    shutil.rmtree(shipit_cache, ignore_errors=True)
+            except Exception:
+                pass
+
+        elif sys.platform == "win32":
+            if update_file.lower().endswith(".exe"):
+                log("Running official Windows installer in silent mode...")
+                subprocess.run([update_file, "/S"], check=True)
+                time.sleep(3)
+            else:
+                with zipfile.ZipFile(update_file, "r") as zf:
+                    zf.extractall(temp_dir)
+                for item in os.listdir(temp_dir):
+                    s = os.path.join(temp_dir, item)
+                    d = os.path.join(app_paths.app_root, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(s, d)
+            try:
+                shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
+            except Exception:
+                pass
+
+        else:
+            # Linux
+            if update_file.lower().endswith(".appimage"):
+                log(f"Replacing AppImage at {app_paths.app_root}...")
+                shutil.copy2(update_file, app_paths.app_root)
+                os.chmod(app_paths.app_root, 0o755)
+            else:
+                with zipfile.ZipFile(update_file, "r") as zf:
+                    zf.extractall(temp_dir)
+                for item in os.listdir(temp_dir):
+                    s = os.path.join(temp_dir, item)
+                    d = os.path.join(app_paths.app_root, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(s, d)
+            try:
+                shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
+            except Exception:
+                pass
+
+        log_success(f"Official update v{update_version} installed successfully!")
+
+    finally:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Re-apply persistence patch to the fresh install
+    log("Applying window persistence patch to new installation...")
+    new_app_paths = find_antigravity_app(app_paths.app_root)
+    apply_patch(new_app_paths, force_kill=True)
+    log_success(f"All set! Antigravity is now updated to v{update_version} with window persistence active.")
+
+
+def parse_version_tuple(v: str) -> tuple:
+    """Parses a version string into an integer tuple for comparison."""
+    try:
+        nums = [int(x) for x in re.findall(r"\d+", v)]
+        return tuple(nums) if nums else (0,)
+    except Exception:
+        return (0,)
+
+
+def check_for_self_update(silent: bool = True) -> tuple:
+    """Checks GitHub repository for a newer version of patch_antigravity_window.py.
+
+    Returns (remote_version, remote_code) if an update is available, or (None, None).
+    """
+    try:
+        with urllib.request.urlopen(GITHUB_RAW_SCRIPT_URL, timeout=2.5) as resp:
+            content = resp.read().decode("utf-8")
+            match = re.search(r'__version__\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+            if not match:
+                if not silent:
+                    log_warn("Could not determine remote version from GitHub.")
+                return None, None
+
+            remote_ver = match.group(1)
+            if parse_version_tuple(remote_ver) > parse_version_tuple(__version__):
+                border = "=" * 62
+                print(f"\n\033[1;36m{border}\033[0m")
+                print(f"\033[1;36m[🚀] Update Available for Antigravity-IDE-WindowSize!\033[0m")
+                print(f"  • Installed version: \033[1;33mv{__version__}\033[0m")
+                print(f"  • Latest version:    \033[1;32mv{remote_ver}\033[0m")
+                print(f"  • Run with \033[1;37m--selfupdate\033[0m (or \033[1;37m./run.sh --selfupdate\033[0m) to update in-place.")
+                print(f"\033[1;36m{border}\033[0m\n")
+                return remote_ver, content
+            else:
+                if not silent:
+                    log_success(f"Antigravity-IDE-WindowSize is up to date (v{__version__}).")
+                return None, None
+    except Exception as e:
+        if not silent:
+            log_warn(f"Notice: Failed to check for script updates online: {e}")
+        return None, None
+
+
+def perform_self_update():
+    """Updates the tool to the latest version available on GitHub."""
+    log("Checking for updates to Antigravity-IDE-WindowSize...")
+    script_path = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_path)
+    git_dir = os.path.join(script_dir, ".git")
+
+    # Method 1: Git repository pull if cloned via git
+    if os.path.isdir(git_dir):
+        log("Detected Git clone. Updating via 'git pull'...")
+        try:
+            res = subprocess.run(
+                ["git", "-C", script_dir, "pull", "--ff-only"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if res.returncode == 0:
+                out = res.stdout.strip()
+                if "Already up to date" in out:
+                    log_success(f"Repository is already up to date (v{__version__}).")
+                else:
+                    log_success(f"Git pull succeeded:\n{out}")
+                return
+            else:
+                log_warn(f"git pull returned notice: {res.stderr.strip()}. Falling back to direct script update...")
+        except Exception as e:
+            log_warn(f"Git pull error: {e}. Falling back to direct script update...")
+
+    # Method 2: Direct download & syntax validation fallback
+    remote_ver, remote_code = check_for_self_update(silent=False)
+    if not remote_code:
+        return
+
+    try:
+        # Validate syntax of downloaded code
+        ast.parse(remote_code)
+    except SyntaxError as e:
+        log_error(f"Downloaded update failed syntax check: {e}. Aborting self-update.")
+        return
+
+    # Write atomically
+    new_script = script_path + ".new"
+    try:
+        with open(new_script, "w", encoding="utf-8") as f:
+            f.write(remote_code)
+        shutil.copymode(script_path, new_script)
+        os.replace(new_script, script_path)
+        log_success(f"Antigravity-IDE-WindowSize successfully updated to v{remote_ver}!")
+    except Exception as e:
+        log_error(f"Failed to save updated script: {e}")
+        if os.path.exists(new_script):
+            os.remove(new_script)
+
+
 def check_status(app_paths: AppPaths):
     """Displays current status of the patch on the detected installation."""
     asar_path = app_paths.asar_path
@@ -752,6 +1029,11 @@ def check_status(app_paths: AppPaths):
     backup_orig = app_paths.backup_orig
     if os.path.exists(backup_orig):
         log(f"Original factory backup present: {backup_orig}")
+
+    update_file, update_ver = find_pending_update()
+    if update_file:
+        log_warn(f"Pending official update detected in cache: v{update_ver} ({os.path.basename(update_file)})")
+        log("Run with --update (or ./run.sh --update) to install the update and automatically re-patch.")
 
 
 def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = False):
@@ -906,6 +1188,17 @@ def main():
         help="Force restore even if an official application update was detected.",
     )
     parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Apply a pending official update downloaded by Antigravity and automatically re-patch.",
+    )
+    parser.add_argument(
+        "--selfupdate",
+        "--self-update",
+        action="store_true",
+        help="Update Antigravity-IDE-WindowSize itself to the latest version from GitHub.",
+    )
+    parser.add_argument(
         "--kill",
         action="store_true",
         help="Automatically terminate Antigravity if it is currently running.",
@@ -913,12 +1206,24 @@ def main():
 
     args = parser.parse_args()
 
+    if args.selfupdate:
+        perform_self_update()
+        return
+
+    # Check for script updates online (silent notification if newer version found)
+    try:
+        check_for_self_update(silent=True)
+    except Exception:
+        pass
+
     app_paths = find_antigravity_app(args.app)
 
     if args.status:
         check_status(app_paths)
     elif args.restore:
         restore_backup(app_paths, force_kill=args.kill, force=args.force)
+    elif args.update:
+        apply_pending_update(app_paths, force_kill=args.kill)
     else:
         apply_patch(app_paths, force_kill=args.kill)
 

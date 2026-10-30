@@ -53,9 +53,10 @@ flowchart LR
 
 - 🖥️ **Multi-Monitor Safe**: If a display is disconnected, the window shifts safely to an active screen.
 - ⏱️ **Debounced Saving**: Geometry writes to native `app_storage.json` without lag (250ms debounce).
-- 🛡️ **Intelligent Downgrade Guard**: Tracks version and ASAR hashes. If Google updates Antigravity, `--restore` will safely abort to prevent downgrading your app with an obsolete backup.
-- 🔄 **Safe Backup Rotation**: When reapplying the patch to a newly updated version, the master backup is automatically updated to match the new stock release.
-- 🔏 **Platform Compliant**: Handles macOS `codesign`/`ElectronAsarIntegrity`, Windows paths, and Linux permissions.
+- 🔄 **Seamless App Updates**: Single-command `--update` applies new Google releases and reapplies persistence automatically.
+- 🚀 **Self-Updating**: Keep this patcher up to date with a single `--selfupdate` command from GitHub.
+- 🛡️ **Intelligent Downgrade Guard**: Tracks version and ASAR hashes to prevent `--restore` from downgrading your app after an official update.
+- 🔏 **Platform Compliant**: Full cross-platform support for macOS (`codesign`), Windows paths/NSIS, and Linux.
 
 ---
 
@@ -86,39 +87,63 @@ python3 patch_antigravity_window.py --kill
 | Option | Argument | Description |
 |---|---|---|
 | *(none)* | — | Applies the persistence patch to the detected installation. |
-| `--status` | — | Checks if the patch is active on `app.asar`. |
+| `--status` | — | Checks if the patch is active on `app.asar` and detects pending updates. |
+| `--update` | — | Installs pending official updates downloaded by Antigravity and automatically re-patches. |
+| `--selfupdate` | — | Updates `Antigravity-IDE-WindowSize` itself to the latest version from GitHub. |
 | `--restore`, `--undo` | — | Restores the stock factory `app.asar` from backup. |
 | `--force`, `--force-restore` | — | Overrides the downgrade protection and forces restoration even if an update was detected. |
-| `--kill` | — | Terminates Antigravity if currently running before patching. |
+| `--kill` | — | Terminates Antigravity if currently running before patching or updating. |
 | `--app` | `<path>` | Custom path to Antigravity folder, executable, or `app.asar`. |
 
 ---
 
-## 🔄 Restoring Factory State
+## 🔄 Updates Workflow
+
+### Updating Antigravity IDE
+When Google pushes a new release, Antigravity downloads it in the background. Because packaged modifications disable in-app restarts on macOS, simply run:
+
+```bash
+# macOS / Linux:
+./run.sh --update --kill
+
+# Windows:
+.\run.bat --update --kill
+```
+This detects the cached official update, installs it cleanly, and immediately re-enables window persistence.
+
+### Updating This Tool
+To pull the latest version of `patch_antigravity_window.py` from GitHub:
+
+```bash
+python3 patch_antigravity_window.py --selfupdate
+# or ./run.sh --selfupdate (Windows: .\run.bat --selfupdate)
+```
+
+---
+
+## ↩️ Restoring Factory State
 
 To revert Antigravity back to stock factory condition at any time:
 
 ```bash
 python3 patch_antigravity_window.py --restore
+# Windows: .\run.bat --restore
 ```
-*(On Windows, run `python patch_antigravity_window.py --restore` or `.\run.bat --restore`)*
 
 > [!NOTE]
 > **Intelligent Downgrade Guard:**
-> If Antigravity was updated by Google after the patch was applied, the script detects the change and prevents `--restore` from overwriting your new version with an obsolete backup. If you genuinely want to force a restore, pass `--force`.
+> If Antigravity was updated by Google after the patch was applied, the script prevents `--restore` from overwriting your new version with an obsolete backup. Pass `--force` only if you explicitly want to override this guard.
 
 ---
 
 ## 🍎 macOS Security & Keychain Notice
 
-When modifying `app.asar` on macOS, the original Google Developer ID signature is replaced with an ad-hoc signature (`codesign -s -`) so macOS Gatekeeper and AMFI allow the modified application to execute.
+When modifying `app.asar` on macOS, the original signature is replaced with an ad-hoc signature (`codesign -s -`) to satisfy Gatekeeper and AMFI.
 
-Please be aware of the following macOS behaviors:
-1. **Keychain Access Prompts:** macOS binds Keychain credentials (stored tokens, passwords) to the binary's code signing identity. On the first launch after patching, macOS may prompt you once:
-   > *"Antigravity wants to access key '...' in your keychain. Enter your login password to allow."*
-   Select **"Always Allow"** to proceed normally.
-2. **In-App Auto-Updates:** Electron's background updater (`Squirrel.Mac` / `ShipIt`) validates that downloaded updates match the running binary's signing certificate. If an automatic background update fails signature verification, simply download the new release or update manually when prompted.
-3. **Official Updates:** When Antigravity updates to a new version, Google replaces `app.asar` with the new stock version (and restores the official Google signature). Simply run this script again to re-enable window persistence.
+On the first launch after patching, macOS may prompt you once:
+> *"Antigravity wants to access key '...' in your keychain. Enter your login password to allow."*
+
+Select **"Always Allow"** to proceed normally. Since macOS binds Keychain entries to binary signatures, this prompt is expected.
 
 <p align="left">
   <a href="https://antigravity.google/download" target="_blank" rel="noopener noreferrer">
