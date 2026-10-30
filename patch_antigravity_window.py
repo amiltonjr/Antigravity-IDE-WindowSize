@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 import argparse
 import ast
@@ -1108,11 +1108,22 @@ def find_pending_update() -> tuple:
 def check_online_update(app_paths: AppPaths) -> dict:
     """Checks official Google Antigravity auto-updater server for new versions.
 
+    Only applies to Antigravity IDE targets (which use product.json / Cloud Run feed).
     Returns a dict with update info if an update is available, or None.
     """
     if not app_paths:
         return None
     try:
+        product = get_app_product_info(app_paths)
+        is_ide = (
+            app_paths.is_unpacked
+            or "ideVersion" in product
+            or product.get("applicationName") == "antigravity-ide"
+            or product.get("nameShort") == "Antigravity IDE"
+        )
+        if not is_ide:
+            return None
+
         machine = platform.machine().lower()
         arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
 
@@ -1123,7 +1134,6 @@ def check_online_update(app_paths: AppPaths) -> dict:
         else:
             platform_arch = f"linux-{arch}"
 
-        product = get_app_product_info(app_paths)
         commit = product.get("commit", "unknown")
         quality = product.get("quality", "stable")
 
@@ -1234,30 +1244,43 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
     update_file, update_version = find_pending_update()
 
     if not update_file:
-        log("Checking official update server for available updates...")
-        online_update = check_online_update(app_paths)
-        if not online_update:
-            log_success("Antigravity is already up to date! No updates available.")
+        product = get_app_product_info(app_paths)
+        is_ide = (
+            app_paths.is_unpacked
+            or "ideVersion" in product
+            or product.get("applicationName") == "antigravity-ide"
+            or product.get("nameShort") == "Antigravity IDE"
+        )
+        if is_ide:
+            log("Checking official Antigravity IDE update server for available updates...")
+            online_update = check_online_update(app_paths)
+            if not online_update:
+                log_success("Antigravity IDE is already up to date! No updates available.")
+                return
+
+            update_version = online_update["version"]
+            cache_dir = os.path.expanduser("~/.cache/antigravity-updater/pending")
+            if sys.platform == "win32":
+                local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local")
+                cache_dir = os.path.join(local_app_data, "antigravity-updater", "pending")
+            elif sys.platform == "darwin":
+                cache_dir = os.path.expanduser("~/Library/Caches/com.google.antigravity/pending")
+
+            os.makedirs(cache_dir, exist_ok=True)
+            raw_filename = os.path.basename(urllib.parse.urlparse(online_update["url"]).path)
+            filename = urllib.parse.unquote(raw_filename) or "update.tar.gz"
+            dest_file = os.path.join(cache_dir, filename)
+
+            if not download_file_with_progress(online_update["url"], dest_file, online_update.get("sha256")):
+                log_error("Could not complete downloading the official update.")
+                return
+
+            update_file = dest_file
+        else:
+            log_warn("No pending official update found in local updater cache.")
+            log("If Antigravity recently notified you of an update, ensure it has finished downloading.")
+            log("You can also download the latest version directly from https://antigravity.google/download")
             return
-
-        update_version = online_update["version"]
-        cache_dir = os.path.expanduser("~/.cache/antigravity-updater/pending")
-        if sys.platform == "win32":
-            local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local")
-            cache_dir = os.path.join(local_app_data, "antigravity-updater", "pending")
-        elif sys.platform == "darwin":
-            cache_dir = os.path.expanduser("~/Library/Caches/com.google.antigravity/pending")
-
-        os.makedirs(cache_dir, exist_ok=True)
-        raw_filename = os.path.basename(urllib.parse.urlparse(online_update["url"]).path)
-        filename = urllib.parse.unquote(raw_filename) or "update.tar.gz"
-        dest_file = os.path.join(cache_dir, filename)
-
-        if not download_file_with_progress(online_update["url"], dest_file, online_update.get("sha256")):
-            log_error("Could not complete downloading the official update.")
-            return
-
-        update_file = dest_file
 
     if update_file and update_version == "latest" and update_file.lower().endswith((".tar.gz", ".tgz", ".tar")):
         try:
@@ -1272,7 +1295,6 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                             break
         except Exception:
             pass
-
     # Check if this pending version is ALREADY installed
     current_installed_ver = None
     if app_paths.asar_path and os.path.exists(app_paths.asar_path):
