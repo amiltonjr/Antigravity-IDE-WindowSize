@@ -82,13 +82,25 @@ class AppPaths:
         asar_path: str,
         resources_dir: str,
         info_plist_path: str = None,
+        is_unpacked: bool = False,
+        app_dir: str = None,
     ):
         self.app_root = app_root
         self.asar_path = asar_path
         self.resources_dir = resources_dir
         self.info_plist_path = info_plist_path
-        self.backup_orig = os.path.join(resources_dir, "app.asar.orig")
-        self.patch_info_path = os.path.join(resources_dir, "app.asar.patch_info.json")
+        self.is_unpacked = is_unpacked
+        self.app_dir = app_dir or os.path.join(resources_dir, "app")
+        self.backup_orig = (
+            os.path.join(resources_dir, "app.asar.orig")
+            if asar_path
+            else os.path.join(resources_dir, "app.orig")
+        )
+        self.patch_info_path = (
+            os.path.join(resources_dir, "app.asar.patch_info.json")
+            if asar_path
+            else os.path.join(resources_dir, "app.patch_info.json")
+        )
 
 
 def resolve_app_structure(base_path: str) -> AppPaths:
@@ -110,9 +122,13 @@ def resolve_app_structure(base_path: str) -> AppPaths:
             info_plist_path=plist if os.path.exists(plist) else None,
         )
 
-    # Case 2: Points to an executable binary (e.g. Antigravity.exe, antigravity)
+    # Case 2: Points to an executable binary (e.g. Antigravity.exe, antigravity, antigravity-ide)
     if os.path.isfile(p):
-        p = os.path.dirname(p)
+        parent = os.path.dirname(p)
+        if os.path.basename(parent) == "bin" and not os.path.exists(os.path.join(parent, "resources")):
+            p = os.path.dirname(parent)
+        else:
+            p = parent
 
     # Case 3: macOS bundle layout (<app>/Contents/Resources/app.asar)
     macos_asar = os.path.join(p, "Contents", "Resources", "app.asar")
@@ -144,6 +160,47 @@ def resolve_app_structure(base_path: str) -> AppPaths:
             asar_path=direct_asar,
             resources_dir=p,
             info_plist_path=None,
+        )
+
+    # Case 6: Unpacked directory layout (<app>/resources/app)
+    unpacked_app = os.path.join(p, "resources", "app")
+    if os.path.isdir(unpacked_app) and (
+        os.path.exists(os.path.join(unpacked_app, "package.json"))
+        or os.path.exists(os.path.join(unpacked_app, "product.json"))
+        or os.path.exists(os.path.join(unpacked_app, "out"))
+    ):
+        return AppPaths(
+            app_root=p,
+            asar_path=None,
+            resources_dir=os.path.join(p, "resources"),
+            info_plist_path=None,
+            is_unpacked=True,
+            app_dir=unpacked_app,
+        )
+
+    # Case 7: Path is directly the resources directory containing 'app' folder
+    if os.path.basename(p) == "resources" and os.path.isdir(os.path.join(p, "app")):
+        parent = os.path.dirname(p)
+        return AppPaths(
+            app_root=parent,
+            asar_path=None,
+            resources_dir=p,
+            info_plist_path=None,
+            is_unpacked=True,
+            app_dir=os.path.join(p, "app"),
+        )
+
+    # Case 8: Path is directly the 'app' directory inside resources
+    if os.path.basename(p) == "app" and os.path.basename(os.path.dirname(p)) == "resources":
+        resources_dir = os.path.dirname(p)
+        parent = os.path.dirname(resources_dir)
+        return AppPaths(
+            app_root=parent,
+            asar_path=None,
+            resources_dir=resources_dir,
+            info_plist_path=None,
+            is_unpacked=True,
+            app_dir=p,
         )
 
     return None
@@ -188,25 +245,35 @@ def get_default_candidate_paths() -> list:
         candidates.extend([
             "/opt/Antigravity",
             "/opt/antigravity",
+            "/opt/Antigravity IDE",
+            "/opt/antigravity-ide",
             "/usr/lib/antigravity",
             "/usr/lib/Antigravity",
+            "/usr/lib/antigravity-ide",
             "/usr/share/antigravity",
             "/usr/share/Antigravity",
+            "/usr/share/antigravity-ide",
             os.path.expanduser("~/.local/share/antigravity"),
             os.path.expanduser("~/.local/share/Antigravity"),
+            os.path.expanduser("~/.local/share/antigravity-ide"),
             os.path.expanduser("~/Applications/Antigravity"),
             os.path.expanduser("~/Applications/antigravity"),
+            os.path.expanduser("~/Applications/Antigravity IDE"),
+            os.path.expanduser("~/Applications/antigravity-ide"),
             os.path.expanduser("~/Downloads/Antigravity-Linux-x64"),
             os.path.expanduser("~/Downloads/antigravity-linux-x64"),
             os.path.expanduser("~/Downloads/Antigravity"),
+            os.path.expanduser("~/Downloads/Antigravity IDE"),
+            os.path.expanduser("~/Downloads/antigravity-ide"),
         ])
 
         # Resolve from PATH if available
-        for bin_name in ["antigravity", "Antigravity"]:
+        for bin_name in ["antigravity", "Antigravity", "antigravity-ide", "Antigravity IDE"]:
             which_path = shutil.which(bin_name)
             if which_path:
                 real_bin = os.path.realpath(which_path)
                 candidates.append(os.path.dirname(real_bin))
+                candidates.append(os.path.dirname(os.path.dirname(real_bin)))
 
     return candidates
 
@@ -292,14 +359,18 @@ def is_app_running(app_paths: AppPaths) -> bool:
     else:
         # Linux
         try:
-            res = subprocess.run(["pgrep", "-f", f"{app_paths.app_root}/antigravity"], capture_output=True, timeout=5)
-            if res.returncode == 0:
-                return True
-            res_caps = subprocess.run(["pgrep", "-f", f"{app_paths.app_root}/Antigravity"], capture_output=True, timeout=5)
-            if res_caps.returncode == 0:
-                return True
-            res_gen = subprocess.run(["pgrep", "-x", "antigravity"], capture_output=True, timeout=5)
-            return res_gen.returncode == 0
+            for bin_name in ["antigravity-ide", "antigravity", "Antigravity"]:
+                res = subprocess.run(["pgrep", "-f", f"{app_paths.app_root}/{bin_name}"], capture_output=True, timeout=5)
+                if res.returncode == 0:
+                    return True
+                res_bin = subprocess.run(["pgrep", "-f", f"{app_paths.app_root}/bin/{bin_name}"], capture_output=True, timeout=5)
+                if res_bin.returncode == 0:
+                    return True
+            for bin_name in ["antigravity-ide", "antigravity", "Antigravity"]:
+                res_gen = subprocess.run(["pgrep", "-x", bin_name], capture_output=True, timeout=5)
+                if res_gen.returncode == 0:
+                    return True
+            return False
         except Exception:
             return False
 
@@ -320,6 +391,7 @@ def kill_running_app(app_paths: AppPaths):
     else:
         # Linux
         try:
+            subprocess.run(["pkill", "-f", "antigravity-ide"], check=False)
             subprocess.run(["pkill", "-f", "antigravity"], check=False)
             subprocess.run(["pkill", "-f", "Antigravity"], check=False)
         except Exception as e:
@@ -375,6 +447,23 @@ def extract_app_version_from_asar(header: dict, payload: bytes) -> str:
         return pkg.get("version", "unknown")
     except Exception:
         return "unknown"
+
+
+def extract_app_version_from_dir(app_dir: str) -> str:
+    """Extracts application version from package.json or product.json in an unpacked app directory."""
+    if not app_dir or not os.path.isdir(app_dir):
+        return "unknown"
+    for fname in ["package.json", "product.json"]:
+        fpath = os.path.join(app_dir, fname)
+        if os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if "version" in data:
+                        return str(data["version"])
+            except Exception:
+                pass
+    return "unknown"
 
 
 def build_asar(header: dict, payload: bytes) -> bytes:
@@ -573,9 +662,53 @@ def generate_patched_utils_js(original_code: str) -> str:
 
 def apply_patch(app_paths: AppPaths, force_kill: bool = False):
     """Applies the window size persistence patch to the targeted installation."""
+    if app_paths.is_unpacked:
+        utils_path = os.path.join(app_paths.app_dir, "dist", "utils.js")
+        if not os.path.exists(utils_path):
+            app_ver = extract_app_version_from_dir(app_paths.app_dir)
+            log_success(f"Detected Antigravity IDE v{app_ver} ({app_paths.app_root}).")
+            log_success(
+                "Antigravity IDE natively persists window geometry (width, height, coordinates, and maximized state)."
+            )
+            log("No ASAR patch required for Antigravity IDE.")
+            return
+
+        if is_app_running(app_paths):
+            if force_kill:
+                kill_running_app(app_paths)
+            else:
+                log_warn("Antigravity is currently running.")
+                if sys.stdin.isatty():
+                    resp = input("Do you want to close Antigravity to apply the patch now? [y/N]: ").strip().lower()
+                    if resp in ("y", "yes", "s", "sim"):
+                        kill_running_app(app_paths)
+                    else:
+                        log_error("Operation aborted. Please close Antigravity before applying the patch.")
+                        sys.exit(1)
+                else:
+                    log_error("Antigravity is running. Close it or use --kill to automatically terminate it.")
+                    sys.exit(1)
+
+        with open(utils_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        if PATCH_MARKER in code:
+            log_warn("Window persistence patch is already applied to this installation!")
+            return
+
+        log("Injecting geometry persistence logic into dist/utils.js...")
+        patched_code = generate_patched_utils_js(code)
+        backup_file = os.path.join(app_paths.app_dir, "dist", "utils.js.orig")
+        if not os.path.exists(backup_file):
+            shutil.copy2(utils_path, backup_file)
+        with open(utils_path, "w", encoding="utf-8") as f:
+            f.write(patched_code)
+        log_success("PATCH APPLIED SUCCESSFULLY to unpacked installation!")
+        return
+
     asar_path = app_paths.asar_path
 
-    if not os.path.exists(asar_path):
+    if not asar_path or not os.path.exists(asar_path):
         log_error(f"app.asar not found at: {asar_path}")
         sys.exit(1)
 
@@ -778,11 +911,15 @@ def find_pending_update() -> tuple:
         search_dirs = [
             os.path.expanduser("~/.cache/com.google.antigravity/pending"),
             os.path.expanduser("~/.cache/antigravity-updater/pending"),
+            os.path.expanduser("~/.cache/antigravity-ide-updater/pending"),
+            os.path.expanduser("~/.cache/Antigravity IDE/pending"),
+            os.path.expanduser("~/.config/Antigravity IDE/pending"),
+            os.path.expanduser("~/.config/antigravity-ide/pending"),
         ]
         for sdir in search_dirs:
             if os.path.isdir(sdir):
                 for f in os.listdir(sdir):
-                    if f.lower().endswith((".zip", ".tar.gz", ".appimage")):
+                    if f.lower().endswith((".zip", ".tar.gz", ".tgz", ".appimage")):
                         candidates.append(os.path.join(sdir, f))
 
     for c in candidates:
@@ -840,12 +977,14 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
 
     # Check if this pending version is ALREADY installed
     current_installed_ver = None
-    if os.path.exists(app_paths.asar_path):
+    if app_paths.asar_path and os.path.exists(app_paths.asar_path):
         try:
             h, p = parse_asar(app_paths.asar_path)
             current_installed_ver = extract_app_version_from_asar(h, p)
         except Exception:
             pass
+    elif app_paths.is_unpacked:
+        current_installed_ver = extract_app_version_from_dir(app_paths.app_dir)
 
     if current_installed_ver and update_version != "latest":
         if parse_version_tuple(current_installed_ver) >= parse_version_tuple(update_version):
@@ -977,6 +1116,17 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                 log(f"Replacing AppImage at {app_paths.app_root}...")
                 shutil.copy2(update_file, app_paths.app_root)
                 os.chmod(app_paths.app_root, 0o755)
+            elif update_file.lower().endswith((".tar.gz", ".tgz", ".tar")):
+                import tarfile
+                with tarfile.open(update_file, "r:*") as tf:
+                    tf.extractall(temp_dir)
+                for item in os.listdir(temp_dir):
+                    s = os.path.join(temp_dir, item)
+                    d = os.path.join(app_paths.app_root, item)
+                    if os.path.isdir(s):
+                        shutil.copytree(s, d, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(s, d)
             else:
                 with zipfile.ZipFile(update_file, "r") as zf:
                     zf.extractall(temp_dir)
@@ -1105,11 +1255,42 @@ def perform_self_update():
 
 def check_status(app_paths: AppPaths):
     """Displays current status of the patch on the detected installation."""
-    asar_path = app_paths.asar_path
     log(f"Detected application: {app_paths.app_root}")
+
+    if app_paths.is_unpacked:
+        log(f"Target Directory: {app_paths.app_dir}")
+        app_version = extract_app_version_from_dir(app_paths.app_dir)
+        log(f"Antigravity Version: {app_version}")
+
+        utils_path = os.path.join(app_paths.app_dir, "dist", "utils.js")
+        if os.path.exists(utils_path):
+            with open(utils_path, "r", encoding="utf-8", errors="ignore") as f:
+                code = f.read()
+            if PATCH_MARKER in code:
+                log_success("Status: PATCH IS ACTIVE and functioning (unpacked).")
+            else:
+                log_warn("Status: PATCH NOT APPLIED (window uses default 1400x900 size).")
+        else:
+            log_success("Status: Antigravity IDE natively persists window geometry via its built-in state manager.")
+            cfg_dir = os.path.expanduser("~/.config/Antigravity IDE")
+            if os.path.exists(cfg_dir):
+                log(f"Storage path: {cfg_dir}")
+
+        update_file, update_ver = find_pending_update()
+        if update_file:
+            is_already_installed = False
+            if update_ver != "latest" and app_version != "unknown":
+                if parse_version_tuple(app_version) >= parse_version_tuple(update_ver):
+                    is_already_installed = True
+            if not is_already_installed:
+                log_warn(f"Pending official update detected in cache: v{update_ver} ({os.path.basename(update_file)})")
+                log("Run with --update (or ./run.sh --update) to install the update and automatically re-patch.")
+        return
+
+    asar_path = app_paths.asar_path
     log(f"Target ASAR: {asar_path}")
 
-    if not os.path.exists(asar_path):
+    if not asar_path or not os.path.exists(asar_path):
         log_error("app.asar not found.")
         return
 
@@ -1159,6 +1340,21 @@ def check_status(app_paths: AppPaths):
 
 def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = False):
     """Restores the original stock factory backup of app.asar safely."""
+    if app_paths.is_unpacked:
+        utils_path = os.path.join(app_paths.app_dir, "dist", "utils.js")
+        backup_utils = os.path.join(app_paths.app_dir, "dist", "utils.js.orig")
+        if os.path.exists(backup_utils):
+            log(f"Restoring {backup_utils} -> {utils_path}...")
+            shutil.copy2(backup_utils, utils_path)
+            log_success("Restored stock utils.js from backup.")
+            return
+        elif os.path.exists(utils_path):
+            log_warn("No backup utils.js.orig found for unpacked installation.")
+            return
+        else:
+            log_success("Antigravity IDE operates with stock configurations natively. No ASAR restoration required.")
+            return
+
     asar_path = app_paths.asar_path
     backup_orig = app_paths.backup_orig
 
