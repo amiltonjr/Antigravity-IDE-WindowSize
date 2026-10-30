@@ -310,13 +310,11 @@ def kill_running_app(app_paths: AppPaths):
     if sys.platform == "win32":
         try:
             subprocess.run(["taskkill", "/F", "/IM", "Antigravity.exe", "/T"], check=False, capture_output=True)
-            time.sleep(1.5)
         except Exception as e:
             log_error(f"Error terminating process: {e}")
     elif sys.platform == "darwin":
         try:
             subprocess.run(["pkill", "-f", f"{app_paths.app_root}/Contents/MacOS/Antigravity"], check=False)
-            time.sleep(1.5)
         except Exception as e:
             log_error(f"Error terminating process: {e}")
     else:
@@ -324,9 +322,15 @@ def kill_running_app(app_paths: AppPaths):
         try:
             subprocess.run(["pkill", "-f", "antigravity"], check=False)
             subprocess.run(["pkill", "-f", "Antigravity"], check=False)
-            time.sleep(1.5)
         except Exception as e:
             log_error(f"Error terminating process: {e}")
+
+    # Ensure processes have completely exited and released file locks across all platforms
+    for _ in range(10):
+        if not is_app_running(app_paths):
+            break
+        time.sleep(0.5)
+    time.sleep(1.0 if sys.platform == "win32" else 0.5)
 
 
 def compute_electron_integrity(data: bytes) -> dict:
@@ -670,11 +674,20 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
         log(f"Creating timestamped backup at: {backup_timestamp}")
         shutil.copy2(asar_path, backup_timestamp)
 
-        # Atomic file write
+        # Atomic file write (with retries for Windows file handle release)
         temp_asar = asar_path + ".tmp"
         with open(temp_asar, "wb") as f:
             f.write(new_asar_bytes)
-        os.replace(temp_asar, asar_path)
+
+        for attempt in range(5):
+            try:
+                os.replace(temp_asar, asar_path)
+                break
+            except PermissionError:
+                if attempt < 4 and sys.platform == "win32":
+                    time.sleep(0.5)
+                else:
+                    raise
         log_success("New app.asar successfully written.")
 
         # Save patch metadata to protect against accidental downgrade on restore
@@ -784,6 +797,21 @@ def find_pending_update() -> tuple:
                         version = plist.get("CFBundleShortVersionString", "latest")
                 except Exception:
                     pass
+            elif sys.platform == "win32":
+                if c.lower().endswith(".exe"):
+                    try:
+                        with open(c, "rb") as ef:
+                            data = ef.read()
+                        m = re.search(
+                            b'(?:P\x00r\x00o\x00d\x00u\x00c\x00t\x00|F\x00i\x00l\x00e\x00)V\x00e\x00r\x00s\x00i\x00o\x00n\x00\x00\x00((?:[0-9\.]\x00)+)',
+                            data,
+                        )
+                        if m:
+                            raw_ver = m.group(1).decode("utf-16le").rstrip("\x00")
+                            if raw_ver and re.match(r"^\d+(\.\d+)+", raw_ver):
+                                version = raw_ver
+                    except Exception:
+                        pass
             info_json = os.path.join(os.path.dirname(c), "update-info.json")
             if version == "latest" and os.path.isfile(info_json):
                 try:
@@ -793,6 +821,10 @@ def find_pending_update() -> tuple:
                             version = data["version"]
                 except Exception:
                     pass
+            if version == "latest":
+                fn_match = re.search(r"(\d+\.\d+\.\d+)", os.path.basename(c))
+                if fn_match:
+                    version = fn_match.group(1)
             return c, version
     return None, None
 
@@ -805,6 +837,32 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
         log("If Antigravity recently notified you of an update, ensure it has finished downloading.")
         log("You can also download the latest version directly from https://antigravity.google/download")
         return
+
+    # Check if this pending version is ALREADY installed
+    current_installed_ver = None
+    if os.path.exists(app_paths.asar_path):
+        try:
+            h, p = parse_asar(app_paths.asar_path)
+            current_installed_ver = extract_app_version_from_asar(h, p)
+        except Exception:
+            pass
+
+    if current_installed_ver and update_version != "latest":
+        if parse_version_tuple(current_installed_ver) >= parse_version_tuple(update_version):
+            log_success(
+                f"Antigravity is already updated to version v{current_installed_ver} "
+                f"(cached update file was v{update_version})."
+            )
+            log("Applying window persistence patch to current installation...")
+            new_app_paths = find_antigravity_app(app_paths.app_root)
+            apply_patch(new_app_paths, force_kill=force_kill)
+            log("Cleaning up stale updater cache...")
+            try:
+                shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
+            except Exception:
+                pass
+            log_success(f"All set! Antigravity v{current_installed_ver} is patched with window persistence active.")
+            return
 
     log(f"Found pending update: v{update_version} ({update_file})")
 
@@ -862,9 +920,42 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
 
         elif sys.platform == "win32":
             if update_file.lower().endswith(".exe"):
-                log("Running official Windows installer in silent mode...")
-                subprocess.run([update_file, "/S"], check=True)
+                log("Running official Windows installer in update mode...")
+                install_dir = os.path.normpath(app_paths.app_root)
+                cmd = [update_file, "--updated", "/S", f"/D={install_dir}"]
+                elevate_exe = os.path.join(app_paths.resources_dir, "elevate.exe")
+
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                if res.returncode != 0:
+                    log_warn(f"Silent update with /D returned code {res.returncode}. Retrying with [--updated, /S]...")
+                    res = subprocess.run([update_file, "--updated", "/S"], capture_output=True, text=True)
+
+                if res.returncode != 0 and os.path.exists(elevate_exe):
+                    log_warn("Retrying with elevation helper (elevate.exe)...")
+                    res = subprocess.run([elevate_exe, update_file, "--updated", "/S"], capture_output=True, text=True)
+
+                if res.returncode != 0:
+                    log_warn(f"Silent install returned code {res.returncode} (NSIS aborted).")
+                    log("Launching installer in standard mode to complete update...")
+                    subprocess.run([update_file, "--updated"])
+
+                log("Waiting for installer to finish updating files...")
                 time.sleep(3)
+                exe_name = os.path.basename(update_file)
+                for _ in range(30):
+                    try:
+                        chk = subprocess.run(
+                            ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/NH"],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                        if exe_name.lower() not in chk.stdout.lower():
+                            break
+                    except Exception:
+                        break
+                    time.sleep(1)
+                time.sleep(2)
             else:
                 with zipfile.ZipFile(update_file, "r") as zf:
                     zf.extractall(temp_dir)
@@ -1057,8 +1148,13 @@ def check_status(app_paths: AppPaths):
 
     update_file, update_ver = find_pending_update()
     if update_file:
-        log_warn(f"Pending official update detected in cache: v{update_ver} ({os.path.basename(update_file)})")
-        log("Run with --update (or ./run.sh --update) to install the update and automatically re-patch.")
+        is_already_installed = False
+        if update_ver != "latest" and app_version != "unknown":
+            if parse_version_tuple(app_version) >= parse_version_tuple(update_ver):
+                is_already_installed = True
+        if not is_already_installed:
+            log_warn(f"Pending official update detected in cache: v{update_ver} ({os.path.basename(update_file)})")
+            log("Run with --update (or ./run.sh --update) to install the update and automatically re-patch.")
 
 
 def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = False):
@@ -1151,7 +1247,15 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = 
 
     log(f"Restoring {backup_orig} -> {asar_path}...")
     try:
-        shutil.copy2(backup_orig, asar_path)
+        for attempt in range(5):
+            try:
+                shutil.copy2(backup_orig, asar_path)
+                break
+            except PermissionError:
+                if attempt < 4 and sys.platform == "win32":
+                    time.sleep(0.5)
+                else:
+                    raise
         remove_patch_info(app_paths)
     except PermissionError as pe:
         log_error(f"Permission denied while restoring {asar_path}: {pe}")
