@@ -27,6 +27,7 @@ import ast
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import struct
@@ -34,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -453,17 +455,44 @@ def extract_app_version_from_dir(app_dir: str) -> str:
     """Extracts application version from package.json or product.json in an unpacked app directory."""
     if not app_dir or not os.path.isdir(app_dir):
         return "unknown"
-    for fname in ["package.json", "product.json"]:
+    for fname in ["product.json", "package.json"]:
         fpath = os.path.join(app_dir, fname)
         if os.path.isfile(fpath):
             try:
                 with open(fpath, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    if data.get("ideVersion") and data["ideVersion"] != "Antigravity IDE":
+                        return str(data["ideVersion"])
                     if "version" in data:
                         return str(data["version"])
             except Exception:
                 pass
     return "unknown"
+
+
+def get_app_product_info(app_paths: AppPaths) -> dict:
+    """Retrieves metadata from product.json if present in app_dir or ASAR."""
+    if not app_paths:
+        return {}
+    if app_paths.app_dir:
+        prod_path = os.path.join(app_paths.app_dir, "product.json")
+        if os.path.isfile(prod_path):
+            try:
+                with open(prod_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    if app_paths.asar_path and os.path.isfile(app_paths.asar_path):
+        try:
+            h, payload = parse_asar(app_paths.asar_path)
+            if "product.json" in h.get("files", {}):
+                entry = h["files"]["product.json"]
+                offset = int(entry["offset"])
+                size = int(entry["size"])
+                return json.loads(payload[offset : offset + size].decode("utf-8"))
+        except Exception:
+            pass
+    return {}
 
 
 def build_asar(header: dict, payload: bytes) -> bytes:
@@ -966,14 +995,159 @@ def find_pending_update() -> tuple:
     return None, None
 
 
+def check_online_update(app_paths: AppPaths) -> dict:
+    """Checks official Google Antigravity auto-updater server for new versions.
+
+    Returns a dict with update info if an update is available, or None.
+    """
+    if not app_paths:
+        return None
+    try:
+        machine = platform.machine().lower()
+        arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+
+        if sys.platform == "darwin":
+            platform_arch = f"darwin-{arch}"
+        elif sys.platform == "win32":
+            platform_arch = f"win32-{arch}-user"
+        else:
+            platform_arch = f"linux-{arch}"
+
+        product = get_app_product_info(app_paths)
+        commit = product.get("commit", "unknown")
+        quality = product.get("quality", "stable")
+
+        feed_url = f"https://antigravity-ide-auto-updater-974169037036.us-central1.run.app/api/update/{platform_arch}/{quality}/{commit}/no_hostname"
+
+        req = urllib.request.Request(feed_url, headers={"User-Agent": "Antigravity-IDE-WindowSize"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status == 204:
+                return None
+            data = json.loads(resp.read().decode("utf-8"))
+            if not data or not data.get("url"):
+                return None
+
+            download_url = data["url"]
+            ver_match = re.search(r"/(\d+\.\d+\.\d+(?:-[^/]+)?)/", download_url)
+            if ver_match:
+                version = ver_match.group(1)
+            else:
+                version = data.get("name") or data.get("productVersion") or "latest"
+
+            return {
+                "version": version,
+                "commit": data.get("version"),
+                "url": download_url,
+                "sha256": data.get("sha256hash"),
+                "displayName": data.get("displayName", os.path.basename(download_url)),
+                "raw": data,
+            }
+    except Exception:
+        return None
+
+
+def download_file_with_progress(url: str, dest_path: str, expected_sha256: str = None) -> bool:
+    """Downloads a file from url to dest_path with download progress and SHA-256 verification."""
+    log(f"Downloading official update from:\n    {url}")
+    temp_dest = dest_path + ".downloading"
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    if os.path.exists(temp_dest):
+        try:
+            os.remove(temp_dest)
+        except Exception:
+            pass
+
+    try:
+        encoded_url = urllib.parse.quote(url, safe=":/%?&=+@#~")
+        req = urllib.request.Request(encoded_url, headers={"User-Agent": "Antigravity-Updater"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            total_size = resp.headers.get("Content-Length")
+            total_bytes = int(total_size) if total_size and total_size.isdigit() else 0
+            downloaded = 0
+            hasher = hashlib.sha256()
+
+            chunk_size = 1024 * 1024  # 1 MB
+            start_time = time.time()
+            last_log_time = start_time
+
+            with open(temp_dest, "wb") as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    hasher.update(chunk)
+                    downloaded += len(chunk)
+                    now = time.time()
+                    if now - last_log_time >= 1.5 or (total_bytes and downloaded == total_bytes):
+                        last_log_time = now
+                        pct = f"({(downloaded / total_bytes) * 100:.1f}%)" if total_bytes else ""
+                        mb_dl = downloaded / (1024 * 1024)
+                        mb_tot = f" / {total_bytes / (1024 * 1024):.1f} MB" if total_bytes else " MB"
+                        speed = mb_dl / max(now - start_time, 0.001)
+                        print(f"[*] Downloading: {mb_dl:.1f}{mb_tot} {pct} [{speed:.1f} MB/s]...", end="\r", flush=True)
+
+            print()
+
+        actual_sha256 = hasher.hexdigest()
+        if expected_sha256 and actual_sha256.lower() != expected_sha256.lower():
+            log_error("SHA-256 verification failed!")
+            log_error(f"  Expected: {expected_sha256}")
+            log_error(f"  Received: {actual_sha256}")
+            if os.path.exists(temp_dest):
+                try:
+                    os.remove(temp_dest)
+                except Exception:
+                    pass
+            return False
+
+        if os.path.exists(dest_path):
+            try:
+                os.remove(dest_path)
+            except Exception:
+                pass
+        os.replace(temp_dest, dest_path)
+        log_success(f"Download complete & verified ({downloaded / (1024 * 1024):.1f} MB).")
+        return True
+    except Exception as e:
+        log_error(f"Download failed: {e}")
+        if os.path.exists(temp_dest):
+            try:
+                os.remove(temp_dest)
+            except Exception:
+                pass
+        return False
+
+
 def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
     """Applies a pending official update and automatically reapplies the window persistence patch."""
     update_file, update_version = find_pending_update()
+
     if not update_file:
-        log_warn("No pending official update found in local updater cache.")
-        log("If Antigravity recently notified you of an update, ensure it has finished downloading.")
-        log("You can also download the latest version directly from https://antigravity.google/download")
-        return
+        log("Checking official update server for available updates...")
+        online_update = check_online_update(app_paths)
+        if not online_update:
+            log_success("Antigravity is already up to date! No updates available.")
+            return
+
+        update_version = online_update["version"]
+        cache_dir = os.path.expanduser("~/.cache/antigravity-updater/pending")
+        if sys.platform == "win32":
+            local_app_data = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local")
+            cache_dir = os.path.join(local_app_data, "antigravity-updater", "pending")
+        elif sys.platform == "darwin":
+            cache_dir = os.path.expanduser("~/Library/Caches/com.google.antigravity/pending")
+
+        os.makedirs(cache_dir, exist_ok=True)
+        raw_filename = os.path.basename(urllib.parse.urlparse(online_update["url"]).path)
+        filename = urllib.parse.unquote(raw_filename) or "update.tar.gz"
+        dest_file = os.path.join(cache_dir, filename)
+
+        if not download_file_with_progress(online_update["url"], dest_file, online_update.get("sha256")):
+            log_error("Could not complete downloading the official update.")
+            return
+
+        update_file = dest_file
 
     # Check if this pending version is ALREADY installed
     current_installed_ver = None
@@ -997,25 +1171,31 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
             apply_patch(new_app_paths, force_kill=force_kill)
             log("Cleaning up stale updater cache...")
             try:
+                if os.path.isfile(update_file):
+                    os.remove(update_file)
                 shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
             except Exception:
                 pass
             log_success(f"All set! Antigravity v{current_installed_ver} is patched with window persistence active.")
             return
 
-    log(f"Found pending update: v{update_version} ({update_file})")
+    log(f"Found update package: v{update_version} ({update_file})")
 
     if is_app_running(app_paths):
         if not force_kill:
             log_warn("Antigravity is currently running. It must be closed to apply the update.")
-            try:
-                ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
-                if ans and ans != "y" and ans != "yes":
-                    log_error("Update cancelled by user.")
+            if sys.stdin.isatty():
+                try:
+                    ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
+                    if ans and ans not in ("y", "yes", "s", "sim"):
+                        log_error("Update cancelled by user.")
+                        return
+                except (EOFError, KeyboardInterrupt):
+                    log_error("\nUpdate cancelled.")
                     return
-            except (EOFError, KeyboardInterrupt):
-                log_error("\nUpdate cancelled.")
-                return
+            else:
+                log_error("Antigravity is running. Close it or use --kill to automatically terminate it before updating.")
+                sys.exit(1)
         kill_running_app(app_paths)
 
     temp_dir = tempfile.mkdtemp(prefix="antigravity_update_")
@@ -1029,8 +1209,12 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                 return
             new_app = os.path.join(temp_dir, "Antigravity.app")
             if not os.path.exists(new_app):
-                log_error(f"Extracted bundle Antigravity.app not found in {temp_dir}")
-                return
+                candidates = [c for c in os.listdir(temp_dir) if c.endswith(".app")]
+                if candidates:
+                    new_app = os.path.join(temp_dir, candidates[0])
+                else:
+                    log_error(f"Extracted bundle not found in {temp_dir}")
+                    return
 
             log(f"Installing new version to {app_paths.app_root}...")
             target_app = app_paths.app_root
@@ -1050,6 +1234,8 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
 
             # Clean up pending updater caches
             try:
+                if os.path.isfile(update_file):
+                    os.remove(update_file)
                 shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
                 shipit_cache = os.path.expanduser("~/Library/Caches/com.google.antigravity.ShipIt")
                 if os.path.exists(shipit_cache):
@@ -1098,14 +1284,26 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
             else:
                 with zipfile.ZipFile(update_file, "r") as zf:
                     zf.extractall(temp_dir)
-                for item in os.listdir(temp_dir):
-                    s = os.path.join(temp_dir, item)
+                extracted_items = [i for i in os.listdir(temp_dir) if not i.startswith(".")]
+                if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
+                    source_dir = os.path.join(temp_dir, extracted_items[0])
+                else:
+                    source_dir = temp_dir
+                for item in os.listdir(source_dir):
+                    s = os.path.join(source_dir, item)
                     d = os.path.join(app_paths.app_root, item)
                     if os.path.isdir(s):
                         shutil.copytree(s, d, dirs_exist_ok=True)
                     else:
+                        if os.path.exists(d):
+                            try:
+                                os.remove(d)
+                            except Exception:
+                                pass
                         shutil.copy2(s, d)
             try:
+                if os.path.isfile(update_file):
+                    os.remove(update_file)
                 shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
             except Exception:
                 pass
@@ -1120,24 +1318,65 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                 import tarfile
                 with tarfile.open(update_file, "r:*") as tf:
                     tf.extractall(temp_dir)
-                for item in os.listdir(temp_dir):
-                    s = os.path.join(temp_dir, item)
+                extracted_items = [i for i in os.listdir(temp_dir) if not i.startswith(".")]
+                if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
+                    source_dir = os.path.join(temp_dir, extracted_items[0])
+                else:
+                    source_dir = temp_dir
+                for item in os.listdir(source_dir):
+                    s = os.path.join(source_dir, item)
                     d = os.path.join(app_paths.app_root, item)
                     if os.path.isdir(s):
                         shutil.copytree(s, d, dirs_exist_ok=True)
                     else:
+                        if os.path.exists(d):
+                            try:
+                                os.remove(d)
+                            except Exception:
+                                pass
                         shutil.copy2(s, d)
             else:
                 with zipfile.ZipFile(update_file, "r") as zf:
                     zf.extractall(temp_dir)
-                for item in os.listdir(temp_dir):
-                    s = os.path.join(temp_dir, item)
+                extracted_items = [i for i in os.listdir(temp_dir) if not i.startswith(".")]
+                if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
+                    source_dir = os.path.join(temp_dir, extracted_items[0])
+                else:
+                    source_dir = temp_dir
+                for item in os.listdir(source_dir):
+                    s = os.path.join(source_dir, item)
                     d = os.path.join(app_paths.app_root, item)
                     if os.path.isdir(s):
                         shutil.copytree(s, d, dirs_exist_ok=True)
                     else:
+                        if os.path.exists(d):
+                            try:
+                                os.remove(d)
+                            except Exception:
+                                pass
                         shutil.copy2(s, d)
+
+            # Ensure executable permissions for Linux binaries
+            for bin_name in ("antigravity-ide", "antigravity", "Antigravity", "chrome_crashpad_handler", "chrome-sandbox"):
+                bp = os.path.join(app_paths.app_root, bin_name)
+                if os.path.isfile(bp):
+                    try:
+                        os.chmod(bp, 0o755)
+                    except Exception:
+                        pass
+            bin_dir = os.path.join(app_paths.app_root, "bin")
+            if os.path.isdir(bin_dir):
+                for b in os.listdir(bin_dir):
+                    bp = os.path.join(bin_dir, b)
+                    if os.path.isfile(bp):
+                        try:
+                            os.chmod(bp, 0o755)
+                        except Exception:
+                            pass
+
             try:
+                if os.path.isfile(update_file):
+                    os.remove(update_file)
                 shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
             except Exception:
                 pass
@@ -1285,6 +1524,14 @@ def check_status(app_paths: AppPaths):
             if not is_already_installed:
                 log_warn(f"Pending official update detected in cache: v{update_ver} ({os.path.basename(update_file)})")
                 log("Run with --update (or ./run.sh --update) to install the update and automatically re-patch.")
+        else:
+            try:
+                online = check_online_update(app_paths)
+                if online:
+                    log_warn(f"Official update available online: v{online['version']} ({online['displayName']})")
+                    log("Run with --update (or ./run.sh --update) to download, install, and automatically re-patch.")
+            except Exception:
+                pass
         return
 
     asar_path = app_paths.asar_path
@@ -1336,6 +1583,14 @@ def check_status(app_paths: AppPaths):
         if not is_already_installed:
             log_warn(f"Pending official update detected in cache: v{update_ver} ({os.path.basename(update_file)})")
             log("Run with --update (or ./run.sh --update) to install the update and automatically re-patch.")
+    else:
+        try:
+            online = check_online_update(app_paths)
+            if online:
+                log_warn(f"Official update available online: v{online['version']} ({online['displayName']})")
+                log("Run with --update (or ./run.sh --update) to download, install, and automatically re-patch.")
+        except Exception:
+            pass
 
 
 def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = False):
