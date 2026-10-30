@@ -56,6 +56,7 @@ flowchart LR
 - 🔄 **Seamless App Updates**: Single-command `--update` applies new Google releases and reapplies persistence automatically.
 - 🚀 **Self-Updating**: Keep this patcher up to date with a single `--selfupdate` command from GitHub.
 - 🛡️ **Intelligent Downgrade Guard**: Tracks version and ASAR hashes to prevent `--restore` from downgrading your app after an official update.
+- 🐧 **Linux Desktop Integration**: Automatically generates `.desktop` shortcuts with official icon for system application menu.
 - 🔏 **Platform Compliant**: Full cross-platform support for macOS (`codesign`), Windows paths/NSIS, and Linux.
 
 ---
@@ -90,6 +91,7 @@ python3 patch_antigravity_window.py --kill
 | `--status` | — | Checks if the patch is active on `app.asar` and detects pending updates. |
 | `--update` | — | Installs pending official updates downloaded by Antigravity and automatically re-patches. |
 | `--selfupdate` | — | Updates `Antigravity-IDE-WindowSize` itself to the latest version from GitHub. |
+| `--shortcut` | — | Creates or refreshes Linux desktop shortcut (`.desktop`) and application menu entry. |
 | `--restore`, `--undo` | — | Restores the stock factory `app.asar` from backup. |
 | `--force`, `--force-restore` | — | Overrides the downgrade protection and forces restoration even if an update was detected. |
 | `--kill` | — | Terminates Antigravity if currently running before patching or updating. |

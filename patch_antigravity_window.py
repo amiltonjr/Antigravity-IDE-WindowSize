@@ -15,12 +15,13 @@ Features:
 - Automatically handles multi-monitor screen repositioning safety.
 - Manages Electron ASAR integrity and macOS codesigning where applicable.
 - Intelligent backup and restore: prevents accidental downgrade when app updates.
+- Automatically manages Linux desktop shortcuts (.desktop) and application menu integration.
 - 100% standalone using Python standard library (no npm, pip, or node needed).
 """
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 import argparse
 import ast
@@ -1391,7 +1392,174 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
     log("Applying window persistence patch to new installation...")
     new_app_paths = find_antigravity_app(app_paths.app_root)
     apply_patch(new_app_paths, force_kill=True)
+    if sys.platform.startswith("linux"):
+        ensure_linux_desktop_entry(new_app_paths)
     log_success(f"All set! Antigravity is now updated to v{update_version} with window persistence active.")
+
+
+def ensure_linux_desktop_entry(app_paths: AppPaths, force: bool = False) -> bool:
+    """Ensures a Linux desktop shortcut (.desktop) and application menu entry exist.
+
+    If not already present or if force is True, creates ~/.local/share/applications/antigravity-ide.desktop
+    with the official icon installed to the user's icon directory.
+    """
+    if not sys.platform.startswith("linux") or not app_paths:
+        return False
+
+    desktop_dir = os.path.expanduser("~/.local/share/applications")
+    desktop_file = os.path.join(desktop_dir, "antigravity-ide.desktop")
+
+    # Locate executable binary
+    binary_path = None
+    for cand in (
+        os.path.join(app_paths.app_root, "antigravity-ide"),
+        os.path.join(app_paths.app_root, "antigravity"),
+        os.path.join(app_paths.app_root, "Antigravity"),
+        os.path.join(app_paths.app_root, "bin", "antigravity-ide"),
+        os.path.join(app_paths.app_root, "bin", "antigravity"),
+    ):
+        if os.path.isfile(cand):
+            binary_path = cand
+            break
+
+    if not binary_path:
+        if os.path.isfile(app_paths.app_root):
+            binary_path = app_paths.app_root
+        else:
+            which_bin = shutil.which("antigravity-ide") or shutil.which("antigravity")
+            if which_bin:
+                binary_path = which_bin
+
+    if not binary_path:
+        return False
+
+    # Check if a desktop entry already exists pointing to this installation
+    if not force:
+        candidates = [
+            desktop_file,
+            os.path.join(desktop_dir, "antigravity.desktop"),
+            "/usr/share/applications/antigravity-ide.desktop",
+            "/usr/share/applications/antigravity.desktop",
+        ]
+        for c in candidates:
+            if os.path.isfile(c) and os.path.getsize(c) > 0:
+                try:
+                    with open(c, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                        if app_paths.app_root in content or binary_path in content or "Antigravity" in content:
+                            return True
+                except Exception:
+                    pass
+
+    # Setup Icon: check repository for icon.png or antigravity.png
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    source_icon = None
+    for icon_name in ("icon.png", "antigravity.png"):
+        candidate_icon = os.path.join(script_dir, icon_name)
+        if os.path.isfile(candidate_icon) and os.path.getsize(candidate_icon) > 100:
+            source_icon = candidate_icon
+            break
+
+    if not source_icon:
+        for cached in (
+            os.path.expanduser("~/.local/share/icons/antigravity.png"),
+            os.path.expanduser("~/.local/share/pixmaps/antigravity.png"),
+        ):
+            if os.path.isfile(cached):
+                source_icon = cached
+                break
+
+    user_icons_dir = os.path.expanduser("~/.local/share/icons")
+    hicolor_apps_dir = os.path.join(user_icons_dir, "hicolor", "512x512", "apps")
+    pixmaps_dir = os.path.expanduser("~/.local/share/pixmaps")
+
+    os.makedirs(user_icons_dir, exist_ok=True)
+    os.makedirs(hicolor_apps_dir, exist_ok=True)
+    os.makedirs(pixmaps_dir, exist_ok=True)
+
+    dest_icon_path = os.path.join(user_icons_dir, "antigravity.png")
+
+    if source_icon and os.path.isfile(source_icon):
+        try:
+            shutil.copy2(source_icon, dest_icon_path)
+            shutil.copy2(source_icon, os.path.join(hicolor_apps_dir, "antigravity-ide.png"))
+            shutil.copy2(source_icon, os.path.join(pixmaps_dir, "antigravity-ide.png"))
+            shutil.copy2(source_icon, os.path.join(pixmaps_dir, "antigravity.png"))
+        except Exception:
+            pass
+    elif not os.path.isfile(dest_icon_path):
+        try:
+            icon_url = "https://antigravity.google/assets/image/brand/antigravity-icon__full-color.png"
+            req = urllib.request.Request(icon_url, headers={"User-Agent": "Antigravity-IDE-WindowSize"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = resp.read()
+                if data:
+                    with open(dest_icon_path, "wb") as f:
+                        f.write(data)
+                    with open(os.path.join(hicolor_apps_dir, "antigravity-ide.png"), "wb") as f:
+                        f.write(data)
+        except Exception:
+            pass
+
+    try:
+        os.chmod(binary_path, 0o755)
+    except Exception:
+        pass
+
+    desktop_content = f"""[Desktop Entry]
+Name=Antigravity IDE
+Comment=Google Antigravity IDE
+GenericName=Integrated Development Environment
+Exec="{binary_path}" %F
+Icon={dest_icon_path}
+Type=Application
+StartupNotify=true
+StartupWMClass=antigravity-ide
+Categories=Development;IDE;TextEditor;
+MimeType=text/plain;inode/directory;x-scheme-handler/antigravity-ide;
+Keywords=antigravity;code;editor;ide;ai;
+Path={app_paths.app_root}
+Actions=new-empty-window;
+
+[Desktop Action new-empty-window]
+Name=New Empty Window
+Name[pt_BR]=Nova Janela Vazia
+Exec="{binary_path}" --new-window %F
+Icon={dest_icon_path}
+"""
+    try:
+        os.makedirs(desktop_dir, exist_ok=True)
+        with open(desktop_file, "w", encoding="utf-8") as f:
+            f.write(desktop_content)
+        os.chmod(desktop_file, 0o755)
+
+        if shutil.which("update-desktop-database"):
+            try:
+                subprocess.run(
+                    ["update-desktop-database", desktop_dir],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
+        if shutil.which("gtk-update-icon-cache"):
+            try:
+                subprocess.run(
+                    ["gtk-update-icon-cache", "-q", "-t", "-f", os.path.join(user_icons_dir, "hicolor")],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
+        log_success(f"Created Linux desktop shortcut: {desktop_file}")
+        return True
+    except Exception as e:
+        log_warn(f"Could not create Linux desktop shortcut: {e}")
+        return False
 
 
 def parse_version_tuple(v: str) -> tuple:
@@ -1515,6 +1683,13 @@ def check_status(app_paths: AppPaths):
             if os.path.exists(cfg_dir):
                 log(f"Storage path: {cfg_dir}")
 
+        if sys.platform.startswith("linux"):
+            df = os.path.expanduser("~/.local/share/applications/antigravity-ide.desktop")
+            if os.path.isfile(df):
+                log_success(f"Desktop shortcut: Active ({df})")
+            else:
+                log_warn("Desktop shortcut: Not found (will be created automatically on next run).")
+
         update_file, update_ver = find_pending_update()
         if update_file:
             is_already_installed = False
@@ -1573,6 +1748,13 @@ def check_status(app_paths: AppPaths):
     backup_orig = app_paths.backup_orig
     if os.path.exists(backup_orig):
         log(f"Original factory backup present: {backup_orig}")
+
+    if sys.platform.startswith("linux"):
+        df = os.path.expanduser("~/.local/share/applications/antigravity-ide.desktop")
+        if os.path.isfile(df):
+            log_success(f"Desktop shortcut: Active ({df})")
+        else:
+            log_warn("Desktop shortcut: Not found (will be created automatically on next run).")
 
     update_file, update_ver = find_pending_update()
     if update_file:
@@ -1783,6 +1965,12 @@ def main():
         action="store_true",
         help="Automatically terminate Antigravity if it is currently running.",
     )
+    parser.add_argument(
+        "--shortcut",
+        "--create-shortcut",
+        action="store_true",
+        help="Create or refresh Linux desktop shortcut (.desktop) and application menu entry.",
+    )
 
     args = parser.parse_args()
 
@@ -1797,6 +1985,13 @@ def main():
         pass
 
     app_paths = find_antigravity_app(args.app)
+
+    # On Linux, ensure the desktop shortcut and application menu entry exist
+    if sys.platform.startswith("linux"):
+        ensure_linux_desktop_entry(app_paths, force=args.shortcut)
+
+    if args.shortcut:
+        return
 
     if args.status:
         check_status(app_paths)
