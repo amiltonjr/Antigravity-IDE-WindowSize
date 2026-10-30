@@ -479,10 +479,7 @@ def generate_patched_utils_js(original_code: str) -> str:
         height: initialBounds.height,
         ...(initialBounds.x !== undefined ? { x: initialBounds.x, y: initialBounds.y } : {}),"""
 
-    target_return_win = """    void win.loadURL(url);
-    return win;"""
-
-    replacement_return_win = """    if (startMaximized) {
+    persistence_listeners = """    if (startMaximized) {
         win.maximize();
     }
 
@@ -519,24 +516,52 @@ def generate_patched_utils_js(original_code: str) -> str:
 
     win.on("resize", persistWindowBounds);
     win.on("move", persistWindowBounds);
-    win.on("close", persistWindowBounds);
+    win.on("close", persistWindowBounds);"""
 
-    void win.loadURL(url);
-    return win;"""
-
+    # Target 1: createWindow signature
     if target_create_window not in original_code:
-        raise RuntimeError("Signature 'function createWindow(url, storageManager)' not found in dist/utils.js")
+        match_cw = re.search(r"function\s+createWindow\s*\(\s*url\s*,\s*storageManager\s*\)\s*\{", original_code)
+        if match_cw:
+            target_create_window = match_cw.group(0)
+        else:
+            raise RuntimeError("Signature 'function createWindow(url, storageManager)' not found in dist/utils.js")
+
+    # Target 2: BrowserWindow initialization (width: 1400, height: 900)
     if target_browser_window not in original_code:
-        raise RuntimeError("Default initialization 'width: 1400, height: 900' not found in dist/utils.js")
-    if target_return_win not in original_code:
-        raise RuntimeError("Snippet 'void win.loadURL(url); return win;' not found in dist/utils.js")
+        match_bw = re.search(
+            r"const\s+win\s*=\s*new\s+electron_1\.BrowserWindow\s*\(\s*\{\s*width:\s*1400\s*,\s*height:\s*900\s*,",
+            original_code,
+        )
+        if match_bw:
+            target_browser_window = match_bw.group(0)
+            replacement_browser_window = """const win = new electron_1.BrowserWindow({
+        width: initialBounds.width,
+        height: initialBounds.height,
+        ...(initialBounds.x !== undefined ? { x: initialBounds.x, y: initialBounds.y } : {}),"""
+        else:
+            raise RuntimeError("Default initialization 'width: 1400, height: 900' not found in dist/utils.js")
+
+    # Target 3: loadURL call (compatible with v2.26, v2.28+, and future versions)
+    target_load_url = "void win.loadURL(url);"
+    replacement_load_url = f"{persistence_listeners}\n\n    void win.loadURL(url);"
+
+    if target_load_url in original_code:
+        target_to_replace = target_load_url
+        replacement_to_use = replacement_load_url
+    else:
+        match_lu = re.search(r"void\s+win\.loadURL\s*\(\s*url\s*\)\s*;", original_code)
+        if match_lu:
+            target_to_replace = match_lu.group(0)
+            replacement_to_use = f"{persistence_listeners}\n\n    {target_to_replace}"
+        else:
+            raise RuntimeError("Snippet 'void win.loadURL(url);' not found in dist/utils.js")
 
     patched = patch_prelude + original_code.replace(
         target_create_window, replacement_create_window, 1
     ).replace(
         target_browser_window, replacement_browser_window, 1
     ).replace(
-        target_return_win, replacement_return_win, 1
+        target_to_replace, replacement_to_use, 1
     )
 
     return patched
