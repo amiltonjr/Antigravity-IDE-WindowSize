@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 import argparse
 import ast
@@ -650,9 +650,31 @@ def remove_patch_info(app_paths: AppPaths):
             pass
 
 
+def is_native_window_persistence_supported(header_or_app_paths, code: str = None) -> bool:
+    """Checks whether Antigravity natively persists window state (v2.29.0+)."""
+    if code and ("trackWindowState" in code or "resolveInitialWindowState" in code):
+        return True
+
+    if isinstance(header_or_app_paths, dict):
+        dist_files = header_or_app_paths.get("files", {}).get("dist", {}).get("files", {})
+        if "windowState.js" in dist_files:
+            return True
+
+    if hasattr(header_or_app_paths, "is_unpacked") and header_or_app_paths.is_unpacked:
+        if header_or_app_paths.app_dir:
+            ws_path = os.path.join(header_or_app_paths.app_dir, "dist", "windowState.js")
+            if os.path.exists(ws_path):
+                return True
+
+    return False
+
+
 def generate_patched_utils_js(original_code: str) -> str:
     """Injects window persistence logic into dist/utils.js."""
     if PATCH_MARKER in original_code:
+        return original_code
+
+    if is_native_window_persistence_supported(None, original_code):
         return original_code
 
     patch_prelude = f"\n{PATCH_MARKER}\nlet _antigravityStorageManager = null;\n"
@@ -750,11 +772,54 @@ def generate_patched_utils_js(original_code: str) -> str:
     win.on("move", persistWindowBounds);
     win.on("close", persistWindowBounds);"""
 
-    # Target 1: createWindow signature
+    # Target 1: createWindow signature (compatible with 2 or 3 parameters)
     if target_create_window not in original_code:
-        match_cw = re.search(r"function\s+createWindow\s*\(\s*url\s*,\s*storageManager\s*\)\s*\{", original_code)
+        match_cw = re.search(r"function\s+createWindow\s*\(\s*url\s*,\s*storageManager(?:\s*,\s*options)?\s*\)\s*\{", original_code)
         if match_cw:
             target_create_window = match_cw.group(0)
+            replacement_create_window = f"""{target_create_window}
+    {PATCH_MARKER}
+    if (storageManager) {{
+        _antigravityStorageManager = storageManager;
+    }} else if (_antigravityStorageManager) {{
+        storageManager = _antigravityStorageManager;
+    }}
+
+    let initialBounds = {{ width: 1400, height: 900 }};
+    let startMaximized = false;
+    try {{
+        const storagePath = (0, paths_1.getAppStoragePath)();
+        if (fs.existsSync(storagePath)) {{
+            const stored = JSON.parse(fs.readFileSync(storagePath, "utf-8"));
+            if (stored.windowBounds) {{
+                const b = typeof stored.windowBounds === "string" ? JSON.parse(stored.windowBounds) : stored.windowBounds;
+                if (b && typeof b.width === "number" && typeof b.height === "number") {{
+                    const w = Math.max(500, Math.round(b.width));
+                    const h = Math.max(400, Math.round(b.height));
+                    const displays = electron_1.screen ? electron_1.screen.getAllDisplays() : [];
+                    let visible = false;
+                    if (typeof b.x === "number" && typeof b.y === "number" && displays.length > 0) {{
+                        visible = displays.some(d => {{
+                            const db = d.bounds;
+                            return b.x >= db.x - 100 && b.x < db.x + db.width &&
+                                   b.y >= db.y - 100 && b.y < db.y + db.height;
+                        }});
+                    }}
+                    if (visible) {{
+                        initialBounds = {{ x: Math.round(b.x), y: Math.round(b.y), width: w, height: h }};
+                    }} else {{
+                        initialBounds = {{ width: w, height: h }};
+                    }}
+                }}
+            }}
+            if (stored.windowMaximized === "true" || stored.windowMaximized === true) {{
+                startMaximized = true;
+            }}
+        }}
+    }} catch (e) {{
+        console.error("[WindowPersistence] Error loading saved window bounds:", e);
+    }}
+"""
         else:
             raise RuntimeError("Signature 'function createWindow(url, storageManager)' not found in dist/utils.js")
 
@@ -803,13 +868,14 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
     """Applies the window size persistence patch to the targeted installation."""
     if app_paths.is_unpacked:
         utils_path = os.path.join(app_paths.app_dir, "dist", "utils.js")
-        if not os.path.exists(utils_path):
+        if not os.path.exists(utils_path) or is_native_window_persistence_supported(app_paths):
             app_ver = extract_app_version_from_dir(app_paths.app_dir)
             log_success(f"Detected Antigravity IDE v{app_ver} ({app_paths.app_root}).")
             log_success(
                 "Antigravity IDE natively persists window geometry (width, height, coordinates, and maximized state)."
             )
-            log("No ASAR patch required for Antigravity IDE.")
+            log("No patch required. Enjoy official window persistence out of the box!")
+            remove_patch_info(app_paths)
             return
 
         if is_app_running(app_paths):
@@ -833,6 +899,16 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
 
         if PATCH_MARKER in code:
             log_warn("Window persistence patch is already applied to this installation!")
+            return
+
+        if is_native_window_persistence_supported(app_paths, code):
+            app_ver = extract_app_version_from_dir(app_paths.app_dir)
+            log_success(f"Detected Antigravity v{app_ver} ({app_paths.app_root}).")
+            log_success(
+                "Antigravity natively persists window geometry (width, height, coordinates, and maximized state)."
+            )
+            log("No patch required. Enjoy official window persistence out of the box!")
+            remove_patch_info(app_paths)
             return
 
         log("Injecting geometry persistence logic into dist/utils.js...")
@@ -885,6 +961,15 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
 
     if PATCH_MARKER in original_utils_code:
         log_warn("Window persistence patch is already applied to this installation!")
+        return
+
+    if is_native_window_persistence_supported(header, original_utils_code):
+        log_success(f"Detected Antigravity v{app_version} with official native window state persistence!")
+        log_success(
+            "Antigravity natively persists window geometry (width, height, coordinates, and maximized state) in this version."
+        )
+        log("No ASAR patch required. Enjoy official window persistence out of the box!")
+        remove_patch_info(app_paths)
         return
 
     log("Injecting geometry persistence logic (size, position, maximized state)...")
@@ -1851,6 +1936,9 @@ def check_status(app_paths: AppPaths):
                 code = f.read()
             if PATCH_MARKER in code:
                 log_success("Status: PATCH IS ACTIVE and functioning (unpacked).")
+            elif is_native_window_persistence_supported(app_paths, code):
+                log_success("Status: Native window state persistence is officially built-in (v2.29.0+).")
+                log("Antigravity natively persists window dimensions, screen coordinates, and maximized state.")
             else:
                 log_warn("Status: PATCH NOT APPLIED (window uses default 1400x900 size).")
         else:
@@ -1912,6 +2000,9 @@ def check_status(app_paths: AppPaths):
         log_success("Status: PATCH IS ACTIVE and functioning.")
         if patch_info and patch_info.get("patched_at"):
             log(f"Patched at: {patch_info['patched_at']}")
+    elif is_native_window_persistence_supported(header, code):
+        log_success("Status: Native window state persistence is officially built-in (v2.29.0+).")
+        log("Antigravity natively persists window dimensions, screen coordinates, and maximized state.")
     else:
         log_warn("Status: PATCH NOT APPLIED (window uses default 1400x900 size).")
         if patch_info and patch_info.get("app_version") and patch_info["app_version"] != app_version:
@@ -1971,12 +2062,30 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = 
     asar_path = app_paths.asar_path
     backup_orig = app_paths.backup_orig
 
-    if not os.path.exists(backup_orig):
-        log_error(f"No original backup found at: {backup_orig}")
+    if not asar_path or not os.path.exists(asar_path):
+        log_error(f"app.asar not found at: {asar_path}")
         sys.exit(1)
 
-    if not os.path.exists(asar_path):
-        log_error(f"app.asar not found at: {asar_path}")
+    if not os.path.exists(backup_orig):
+        try:
+            curr_header, curr_payload = parse_asar(asar_path)
+            app_version = extract_app_version_from_asar(curr_header, curr_payload)
+            utils_entry = curr_header["files"]["dist"]["files"]["utils.js"]
+            curr_utils_code = curr_payload[
+                int(utils_entry["offset"]) : int(utils_entry["offset"]) + utils_entry["size"]
+            ].decode("utf-8", "ignore")
+            if is_native_window_persistence_supported(curr_header, curr_utils_code):
+                log_success(f"Antigravity v{app_version} already features official native window state persistence.")
+                log("The application is in stock factory state with native window persistence active. No restoration needed.")
+                remove_patch_info(app_paths)
+                return
+            elif PATCH_MARKER not in curr_utils_code:
+                log_warn(f"Antigravity v{app_version} is already running in stock factory state without patches.")
+                return
+        except Exception:
+            pass
+
+        log_error(f"No original backup found at: {backup_orig}")
         sys.exit(1)
 
     # Read current ASAR and backup hashes
@@ -1994,18 +2103,29 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = 
         remove_patch_info(app_paths)
         return
 
-    # Check 2: Check if current ASAR has patch marker
+    # Check 2: Check if current ASAR has patch marker or native persistence
     current_is_patched = False
+    is_native_persisted = False
+    app_version = "unknown"
     try:
         curr_header, curr_payload = parse_asar(asar_path)
+        app_version = extract_app_version_from_asar(curr_header, curr_payload)
         utils_entry = curr_header["files"]["dist"]["files"]["utils.js"]
         curr_utils_code = curr_payload[
             int(utils_entry["offset"]) : int(utils_entry["offset"]) + utils_entry["size"]
         ].decode("utf-8", "ignore")
         if PATCH_MARKER in curr_utils_code:
             current_is_patched = True
+        elif is_native_window_persistence_supported(curr_header, curr_utils_code):
+            is_native_persisted = True
     except Exception:
         pass
+
+    if is_native_persisted and not current_is_patched:
+        log_success(f"Antigravity v{app_version} already features official native window state persistence.")
+        log("The application is in stock factory state with native window persistence active. No restoration needed.")
+        remove_patch_info(app_paths)
+        return
 
     # Check 3: Has Antigravity updated since the patch was applied?
     patch_info = load_patch_info(app_paths)
@@ -2101,6 +2221,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Patch to persist window size and position in Antigravity (macOS, Windows & Linux).",
         epilog="Author: Amilton Camargo Junior (Comandante) • https://comandanteamilton.com.br/",
+    )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show program's version number and exit.",
     )
     parser.add_argument(
         "--app",

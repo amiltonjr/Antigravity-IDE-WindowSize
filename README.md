@@ -59,6 +59,10 @@ flowchart LR
 - 🐧 **Linux Desktop Integration**: Automatically generates `.desktop` shortcuts with official icon for system application menu.
 - 🔏 **Platform Compliant**: Full cross-platform support for macOS (`codesign`), Windows paths/NSIS, and Linux.
 
+> [!NOTE]
+> **Antigravity v2.29.0+ Native Support:**
+> Starting with version 2.29.0, Google officially integrated native window geometry persistence (`dist/windowState.js`). This tool automatically detects this feature and operates seamlessly across all versions: it preserves the stock architecture on v2.29.0+ while continuing to inject persistence on legacy versions (v2.26 - v2.28).
+
 ---
 
 ## 🚀 Quick Start
@@ -88,6 +92,7 @@ python3 patch_antigravity_window.py --kill
 | Option | Argument | Description |
 |---|---|---|
 | *(none)* | — | Applies the persistence patch to the detected installation. |
+| `-v`, `--version` | — | Shows program version number and exits. |
 | `--status` | — | Checks if the patch is active on `app.asar` and detects pending updates. |
 | `--update` | — | Installs pending official updates downloaded by Antigravity and automatically re-patches. |
 | `--selfupdate` | — | Updates `Antigravity-IDE-WindowSize` itself to the latest version from GitHub. |
