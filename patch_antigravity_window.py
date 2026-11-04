@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 
 import argparse
 import ast
@@ -878,22 +878,6 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
             remove_patch_info(app_paths)
             return
 
-        if is_app_running(app_paths):
-            if force_kill:
-                kill_running_app(app_paths)
-            else:
-                log_warn("Antigravity is currently running.")
-                if sys.stdin.isatty():
-                    resp = input("Do you want to close Antigravity to apply the patch now? [y/N]: ").strip().lower()
-                    if resp in ("y", "yes", "s", "sim"):
-                        kill_running_app(app_paths)
-                    else:
-                        log_error("Operation aborted. Please close Antigravity before applying the patch.")
-                        sys.exit(1)
-                else:
-                    log_error("Antigravity is running. Close it or use --kill to automatically terminate it.")
-                    sys.exit(1)
-
         with open(utils_path, "r", encoding="utf-8") as f:
             code = f.read()
 
@@ -913,6 +897,26 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
 
         log("Injecting geometry persistence logic into dist/utils.js...")
         patched_code = generate_patched_utils_js(code)
+
+        if is_app_running(app_paths):
+            if force_kill:
+                kill_running_app(app_paths)
+            else:
+                log_warn("Antigravity is currently running.")
+                if sys.stdin.isatty():
+                    try:
+                        resp = input("Do you want to close Antigravity to apply the patch now? [y/N]: ").strip().lower()
+                        if resp in ("y", "yes", "s", "sim"):
+                            kill_running_app(app_paths)
+                        else:
+                            log_error("Operation aborted. Please close Antigravity before applying the patch.")
+                            sys.exit(1)
+                    except (EOFError, KeyboardInterrupt):
+                        log_error("\nOperation aborted.")
+                        sys.exit(1)
+                else:
+                    log_error("Antigravity is running. Close it or use --kill to automatically terminate it.")
+                    sys.exit(1)
         backup_file = os.path.join(app_paths.app_dir, "dist", "utils.js.orig")
         if not os.path.exists(backup_file):
             shutil.copy2(utils_path, backup_file)
@@ -926,22 +930,6 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
     if not asar_path or not os.path.exists(asar_path):
         log_error(f"app.asar not found at: {asar_path}")
         sys.exit(1)
-
-    if is_app_running(app_paths):
-        if force_kill:
-            kill_running_app(app_paths)
-        else:
-            log_warn("Antigravity is currently running.")
-            if sys.stdin.isatty():
-                resp = input("Do you want to close Antigravity to apply the patch now? [y/N]: ").strip().lower()
-                if resp in ("y", "yes", "s", "sim"):
-                    kill_running_app(app_paths)
-                else:
-                    log_error("Operation aborted. Please close Antigravity before applying the patch.")
-                    sys.exit(1)
-            else:
-                log_error("Antigravity is running. Close it or use --kill to automatically terminate it.")
-                sys.exit(1)
 
     log(f"Unpacking and reading ASAR: {asar_path}")
     header, payload = parse_asar(asar_path)
@@ -1008,6 +996,26 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
         app_paths.resources_dir,
         f"app.asar.backup-{time.strftime('%Y%m%d-%H%M%S')}",
     )
+
+    if is_app_running(app_paths):
+        if force_kill:
+            kill_running_app(app_paths)
+        else:
+            log_warn("Antigravity is currently running.")
+            if sys.stdin.isatty():
+                try:
+                    resp = input("Do you want to close Antigravity to apply the patch now? [y/N]: ").strip().lower()
+                    if resp in ("y", "yes", "s", "sim"):
+                        kill_running_app(app_paths)
+                    else:
+                        log_error("Operation aborted. Please close Antigravity before applying the patch.")
+                        sys.exit(1)
+                except (EOFError, KeyboardInterrupt):
+                    log_error("\nOperation aborted.")
+                    sys.exit(1)
+            else:
+                log_error("Antigravity is running. Close it or use --kill to automatically terminate it.")
+                sys.exit(1)
 
     try:
         with open(asar_path, "rb") as f:
@@ -1412,44 +1420,51 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
 
     log(f"Found update package: v{update_version} ({update_file})")
 
-    if is_app_running(app_paths):
-        # On Linux, check if the updater is being run from inside Antigravity itself
-        if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
-            log_warn("Antigravity is currently running (updater launched from inside its integrated terminal).")
-            log("Applying update in-place safely without terminating current session...")
-            log("Please restart Antigravity IDE after the update completes to load the new version.")
-        else:
-            if not force_kill:
-                log_warn("Antigravity is currently running. It must be closed to apply the update.")
-                if sys.platform.startswith("linux"):
-                    if sys.stdin.isatty():
-                        try:
-                            ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
-                            if ans and ans not in ("y", "yes", "s", "sim"):
-                                log("Applying update in-place without closing. Please restart Antigravity IDE when done.")
-                            else:
-                                kill_running_app(app_paths)
-                        except (EOFError, KeyboardInterrupt):
-                            log_error("\nUpdate cancelled.")
-                            return
-                    else:
-                        log("Applying update in-place safely without closing. Please restart Antigravity IDE when done.")
-                else:
-                    if sys.stdin.isatty():
-                        try:
-                            ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
-                            if ans and ans not in ("y", "yes", "s", "sim"):
-                                log_error("Update cancelled by user.")
-                                return
-                            kill_running_app(app_paths)
-                        except (EOFError, KeyboardInterrupt):
-                            log_error("\nUpdate cancelled.")
-                            return
-                    else:
-                        log_error("Antigravity is running. Close it or use --kill to automatically terminate it before updating.")
-                        sys.exit(1)
-            else:
+    def prompt_close_app_for_update() -> bool:
+        if is_app_running(app_paths):
+            # On Linux, check if the updater is being run from inside Antigravity itself
+            if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
+                log_warn("Antigravity is currently running (updater launched from inside its integrated terminal).")
+                log("Applying update in-place safely without terminating current session...")
+                log("Please restart Antigravity IDE after the update completes to load the new version.")
+                return True
+
+            if force_kill:
                 kill_running_app(app_paths)
+                return True
+
+            log_warn("Antigravity is currently running. It must be closed to apply the update.")
+            if sys.platform.startswith("linux"):
+                if sys.stdin.isatty():
+                    try:
+                        ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
+                        if ans and ans not in ("y", "yes", "s", "sim"):
+                            log("Applying update in-place without closing. Please restart Antigravity IDE when done.")
+                            return True
+                        kill_running_app(app_paths)
+                        return True
+                    except (EOFError, KeyboardInterrupt):
+                        log_error("\nUpdate cancelled.")
+                        return False
+                else:
+                    log("Applying update in-place safely without closing. Please restart Antigravity IDE when done.")
+                    return True
+            else:
+                if sys.stdin.isatty():
+                    try:
+                        ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
+                        if ans and ans not in ("y", "yes", "s", "sim"):
+                            log_error("Update cancelled by user.")
+                            return False
+                        kill_running_app(app_paths)
+                        return True
+                    except (EOFError, KeyboardInterrupt):
+                        log_error("\nUpdate cancelled.")
+                        return False
+                else:
+                    log_error("Antigravity is running. Close it or use --kill to automatically terminate it before updating.")
+                    sys.exit(1)
+        return True
 
     temp_dir = tempfile.mkdtemp(prefix="antigravity_update_")
     try:
@@ -1468,6 +1483,9 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                 else:
                     log_error(f"Extracted bundle not found in {temp_dir}")
                     return
+
+            if not prompt_close_app_for_update():
+                return
 
             log(f"Installing new version to {app_paths.app_root}...")
             target_app = app_paths.app_root
@@ -1498,6 +1516,8 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
 
         elif sys.platform == "win32":
             if update_file.lower().endswith(".exe"):
+                if not prompt_close_app_for_update():
+                    return
                 log("Running official Windows installer in update mode...")
                 install_dir = os.path.normpath(app_paths.app_root)
                 cmd = [update_file, "--updated", "/S", f"/D={install_dir}"]
@@ -1542,6 +1562,8 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                     source_dir = os.path.join(temp_dir, extracted_items[0])
                 else:
                     source_dir = temp_dir
+                if not prompt_close_app_for_update():
+                    return
                 for item in os.listdir(source_dir):
                     s = os.path.join(source_dir, item)
                     d = os.path.join(app_paths.app_root, item)
@@ -1564,6 +1586,8 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
         else:
             # Linux
             if update_file.lower().endswith(".appimage"):
+                if not prompt_close_app_for_update():
+                    return
                 log(f"Replacing AppImage at {app_paths.app_root}...")
                 if os.path.exists(app_paths.app_root):
                     try:
@@ -1581,6 +1605,8 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                     source_dir = os.path.join(temp_dir, extracted_items[0])
                 else:
                     source_dir = temp_dir
+                if not prompt_close_app_for_update():
+                    return
                 log(f"Installing update files into {app_paths.app_root}...")
                 safe_copy_tree(source_dir, app_paths.app_root)
             else:
@@ -1591,6 +1617,8 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
                     source_dir = os.path.join(temp_dir, extracted_items[0])
                 else:
                     source_dir = temp_dir
+                if not prompt_close_app_for_update():
+                    return
                 log(f"Installing update files into {app_paths.app_root}...")
                 safe_copy_tree(source_dir, app_paths.app_root)
 
