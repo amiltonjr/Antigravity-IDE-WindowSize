@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 import argparse
 import ast
@@ -180,8 +180,21 @@ PAUSE_RENDERER_JS = r"""(() => {
     const CANCELLED_TEXT_ORIG = "User cancelled agent execution.";
     const PAUSED_TEXT_REPLACEMENT = "The process has been paused.";
 
-    // Map<cascadeId, { status: "pausing" | "paused" | "resuming", heldQueue: Array, capturedContext: Object | null, pausedAt: number }>
+    // Map<cascadeId, { status: "pausing" | "paused" | "resuming", heldQueue: Array, capturedContext: Object | null, pausedAt: number, sawIdleAfterPause: boolean }>
     const pausedMap = new Map();
+    const explicitlyCancelledSet = new Set();
+
+    document.addEventListener("click", (ev) => {
+        const cancelBtn = ev.target?.closest?.('[data-testid="cancel-invocation-button"]');
+        if (cancelBtn) {
+            const footerEl = cancelBtn.closest(".agy-composer-footer") || document.querySelector(".agy-composer-footer");
+            const info = footerEl ? inspectFooterFiber(footerEl) : null;
+            if (info?.cascadeKey) {
+                explicitlyCancelledSet.add(info.cascadeKey);
+                pausedMap.delete(info.cascadeKey);
+            }
+        }
+    }, true);
 
     function getReactFiber(el) {
         if (!el || typeof el !== "object") return null;
@@ -375,6 +388,7 @@ PAUSE_RENDERER_JS = r"""(() => {
         if (!info || !info.isRunning || typeof info.cancelInvocation !== "function") return;
 
         const key = info.cascadeKey;
+        explicitlyCancelledSet.delete(key);
         const snapshotQueue = cloneQueuedInputs(info.queuedUserInputs);
         const capturedContext = capturePartialContext(info);
 
@@ -383,8 +397,23 @@ PAUSE_RENDERER_JS = r"""(() => {
             heldQueue: snapshotQueue,
             capturedContext,
             pausedAt: Date.now(),
+            sawIdleAfterPause: false,
         });
         syncFooter(footerEl);
+
+        // Remove live queued items from language_server before cancelling so they do not auto-fire when turn becomes IDLE
+        if (snapshotQueue.length > 0 && info.lsClient && typeof info.lsClient.deleteAgentMessage === "function" && info.rawCascadeId) {
+            for (const qItem of snapshotQueue) {
+                if (qItem.msgId) {
+                    try {
+                        await info.lsClient.deleteAgentMessage({
+                            messageId: qItem.msgId,
+                            recipient: info.rawCascadeId,
+                        });
+                    } catch {}
+                }
+            }
+        }
 
         try {
             await info.cancelInvocation();
@@ -392,12 +421,22 @@ PAUSE_RENDERER_JS = r"""(() => {
             console.error("[AntigravityPause] Error pausing invocation:", err);
         }
 
+        // Wait until React state transitions isRunning -> false before marking status = "paused"
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 3500) {
+            const checkInfo = inspectFooterFiber(footerEl);
+            if (!checkInfo || !checkInfo.isRunning) break;
+            await new Promise(r => setTimeout(r, 40));
+        }
+
         const currentEntry = pausedMap.get(key);
         if (currentEntry) {
             const postInfo = inspectFooterFiber(footerEl);
             const postQueue = cloneQueuedInputs(postInfo?.queuedUserInputs);
             currentEntry.status = "paused";
-            if (postQueue.length > 0) {
+            currentEntry.sawIdleAfterPause = true;
+            currentEntry.pausedAt = Date.now();
+            if (postQueue.length > 0 && currentEntry.heldQueue.length === 0) {
                 currentEntry.heldQueue = postQueue;
             }
         }
@@ -563,6 +602,17 @@ PAUSE_RENDERER_JS = r"""(() => {
         return slot;
     }
 
+    function hasPausedNoticeInDOM() {
+        const notices = document.querySelectorAll("div.text-secondary-foreground");
+        for (let i = 0; i < notices.length; i++) {
+            const t = (notices[i].textContent || "").trim();
+            if (t === PAUSED_TEXT_REPLACEMENT || t === CANCELLED_TEXT_ORIG) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     function syncFooter(footerEl) {
         if (!footerEl || !footerEl.isConnected) return;
         const info = inspectFooterFiber(footerEl);
@@ -582,12 +632,38 @@ PAUSE_RENDERER_JS = r"""(() => {
         }
         footerEl.__agyLastCascadeKey = info.cascadeKey;
 
+        if (info.isRunning) {
+            explicitlyCancelledSet.delete(info.cascadeKey);
+        }
+
         let entry = pausedMap.get(info.cascadeKey);
 
-        // If user manually started a new turn while paused, clear the paused state
-        if (entry && entry.status === "paused" && info.isRunning) {
-            pausedMap.delete(info.cascadeKey);
-            entry = undefined;
+        if (entry && entry.status === "pausing" && !info.isRunning) {
+            entry.status = "paused";
+            entry.sawIdleAfterPause = true;
+            entry.pausedAt = Date.now();
+        }
+
+        if (entry && entry.status === "paused") {
+            if (!info.isRunning) {
+                entry.sawIdleAfterPause = true;
+            } else if (entry.sawIdleAfterPause && (Date.now() - entry.pausedAt > 800)) {
+                // User manually started a new turn after the session had already settled into IDLE
+                pausedMap.delete(info.cascadeKey);
+                entry = undefined;
+            }
+        }
+
+        // Auto-recover paused state if session has "The process has been paused." notice and is IDLE
+        if (!entry && !info.isRunning && !explicitlyCancelledSet.has(info.cascadeKey) && hasPausedNoticeInDOM()) {
+            entry = {
+                status: "paused",
+                heldQueue: cloneQueuedInputs(info.queuedUserInputs),
+                capturedContext: capturePartialContext(info),
+                pausedAt: Date.now() - 1000,
+                sawIdleAfterPause: true,
+            };
+            pausedMap.set(info.cascadeKey, entry);
         }
 
         // Keep heldQueue synced if user edited/deleted queued messages while paused
