@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.6"
+__version__ = "1.3.7"
 
 import argparse
 import ast
@@ -349,37 +349,184 @@ PAUSE_RENDERER_JS = r"""(() => {
         return false;
     }
 
-    function wrapSubmitContext(info) {
-        if (!info) return;
-        const { submitCtx, lsClient } = info;
+    function enqueueHeldMessage(entry, payload) {
+        if (!entry || !payload || typeof payload !== "object") return false;
+        const rawItems = Array.isArray(payload.items) ? payload.items : [];
+        const rawMedia = Array.isArray(payload.media) ? payload.media : [];
+        if (rawItems.length === 0 && rawMedia.length === 0) return false;
 
-        if (submitCtx && typeof submitCtx === "object") {
-            if (info.cascadeKey) {
-                submitCtx.__agyCurrentCascadeKey = info.cascadeKey;
+        let msgId = payload.clientMessageId;
+        if (!msgId && Array.isArray(payload.tags)) {
+            const clientTag = payload.tags.find(t => typeof t === "string" && t.startsWith("client_msg:"));
+            if (clientTag) msgId = clientTag.slice("client_msg:".length);
+        }
+        if (!msgId) {
+            msgId = `held-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        }
+
+        const alreadyQueued = entry.heldQueue.some(q => q && q.msgId && q.msgId === msgId);
+        if (alreadyQueued) return false;
+
+        entry.heldQueue.push({
+            msgId,
+            deliveryStrategy: 2,
+            metadata: undefined,
+            step: {
+                items: [...rawItems],
+                media: [...rawMedia],
+                artifactComments: Array.isArray(payload.artifactComments) ? [...payload.artifactComments] : [],
+                fileDiffComments: Array.isArray(payload.fileDiffComments) ? [...payload.fileDiffComments] : [],
+                fileComments: Array.isArray(payload.fileComments) ? [...payload.fileComments] : [],
+            },
+            queuedViaHook: true,
+        });
+        savePausedStateToStorage();
+        return true;
+    }
+
+    function clearPhantomOptimisticEffects(info) {
+        if (!info || !info.rawCascadeId || !info.optProvider?.registry) return;
+        try {
+            const reg = info.optProvider.registry;
+            const effectsMap = reg._effects;
+            if (effectsMap instanceof Map) {
+                const effs = effectsMap.get(info.rawCascadeId);
+                if (Array.isArray(effs) && effs.length > 0) {
+                    for (const eff of effs) {
+                        try { eff.dispose?.(); } catch {}
+                    }
+                    effectsMap.set(info.rawCascadeId, []);
+                    const stEntry = reg.peek?.(info.rawCascadeId);
+                    stEntry?.optimisticState?.setState?.(undefined);
+                }
             }
-            if (!submitCtx.__agyPauseWrapped) {
-                const origAppend = submitCtx.appendOptimisticUserMessage;
-                const origSend = submitCtx.sendMessage;
-                const origCancelQuestion = submitCtx.cancelActiveQuestionBeforeSend;
-                const origBeginInteraction = submitCtx.beginPromptInteraction;
-                submitCtx.__agyOrigAppendOptimistic = origAppend;
-                submitCtx.__agyOrigSendMessage = origSend;
-                submitCtx.__agyPauseWrapped = true;
+        } catch {}
+    }
 
-                if (typeof origCancelQuestion === "function") {
-                    submitCtx.cancelActiveQuestionBeforeSend = function (...args) {
-                        const cKey = submitCtx.__agyCurrentCascadeKey || "__default_pane__";
-                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
-                        if (entry && (entry.status === "paused" || entry.status === "pausing")) {
-                            return Promise.resolve();
-                        }
-                        return origCancelQuestion.apply(this, args);
+    function wrapSingleSubmitCtx(submitCtx, cascadeKey) {
+        if (!submitCtx || typeof submitCtx !== "object") return;
+        if (cascadeKey) {
+            submitCtx.__agyCurrentCascadeKey = cascadeKey;
+        }
+        if (submitCtx.__agyPauseWrapped) return;
+
+        const origAppend = submitCtx.appendOptimisticUserMessage;
+        const origSend = submitCtx.sendMessage;
+        const origCancelQuestion = submitCtx.cancelActiveQuestionBeforeSend;
+        const origBeginInteraction = submitCtx.beginPromptInteraction;
+        submitCtx.__agyOrigAppendOptimistic = origAppend;
+        submitCtx.__agyOrigSendMessage = origSend;
+        submitCtx.__agyPauseWrapped = true;
+
+        if (typeof origCancelQuestion === "function") {
+            submitCtx.cancelActiveQuestionBeforeSend = function (...args) {
+                const cKey = submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+                const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                if (entry && (entry.status === "paused" || entry.status === "pausing")) {
+                    return Promise.resolve();
+                }
+                return origCancelQuestion.apply(this, args);
+            };
+        }
+
+        if (typeof origBeginInteraction === "function") {
+            submitCtx.beginPromptInteraction = function (params, ...rest) {
+                const cKey = params?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+                const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                if (entry && (entry.status === "paused" || entry.status === "pausing")) {
+                    return {
+                        cancelled: () => {},
+                        dispatched: () => {},
+                        errored: () => {},
                     };
                 }
+                return origBeginInteraction.call(this, params, ...rest);
+            };
+        }
 
-                if (typeof origBeginInteraction === "function") {
-                    submitCtx.beginPromptInteraction = function (params, ...rest) {
-                        const cKey = params?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+        if (typeof origAppend === "function") {
+            submitCtx.appendOptimisticUserMessage = function (params, options) {
+                const cKey = params?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+                const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(params)) {
+                    enqueueHeldMessage(entry, params);
+                    scheduleSync();
+                    return {
+                        dispose: () => {},
+                        markAsFailed: () => {},
+                        hold: () => ({ dispose: () => {} }),
+                    };
+                }
+                return origAppend.call(this, params, options);
+            };
+        }
+
+        if (typeof origSend === "function") {
+            submitCtx.sendMessage = function (req, ...rest) {
+                const cKey = req?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+                const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(req)) {
+                    enqueueHeldMessage(entry, req);
+                    scheduleSync();
+                    return Promise.resolve({});
+                }
+                return origSend.call(this, req, ...rest);
+            };
+        }
+    }
+
+    function wrapSubmitContext(info) {
+        if (!info) return;
+        const { submitCtx, submitCtxList, lsClient, optProvider, interactionTracker, cascadeKey } = info;
+
+        if (Array.isArray(submitCtxList)) {
+            for (const ctx of submitCtxList) {
+                wrapSingleSubmitCtx(ctx, cascadeKey);
+            }
+        } else if (submitCtx) {
+            wrapSingleSubmitCtx(submitCtx, cascadeKey);
+        }
+
+        // Wrap singleton OptimisticTrajectoryProvider context (FB()) so every re-render of U_(a) gets the wrapped appendOptimisticUserMessage
+        if (optProvider && typeof optProvider === "object") {
+            if (cascadeKey) {
+                optProvider.__agyCurrentCascadeKey = cascadeKey;
+            }
+            if (!optProvider.__agyPauseWrapped) {
+                const origOptAppend = optProvider.appendOptimisticUserMessage;
+                if (typeof origOptAppend === "function") {
+                    optProvider.__agyOrigAppendOptimistic = origOptAppend;
+                    optProvider.__agyPauseWrapped = true;
+                    optProvider.appendOptimisticUserMessage = function (params, options) {
+                        const cKey = params?.cascadeId || optProvider.__agyCurrentCascadeKey || "__default_pane__";
+                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                        if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(params)) {
+                            enqueueHeldMessage(entry, params);
+                            scheduleSync();
+                            return {
+                                dispose: () => {},
+                                markAsFailed: () => {},
+                                hold: () => ({ dispose: () => {} }),
+                            };
+                        }
+                        return origOptAppend.call(this, params, options);
+                    };
+                }
+            }
+        }
+
+        // Wrap singleton PromptInteractionTracker context (DXb())
+        if (interactionTracker && typeof interactionTracker === "object") {
+            if (cascadeKey) {
+                interactionTracker.__agyCurrentCascadeKey = cascadeKey;
+            }
+            if (!interactionTracker.__agyPauseWrapped) {
+                const origBegin = interactionTracker.begin;
+                if (typeof origBegin === "function") {
+                    interactionTracker.__agyOrigBegin = origBegin;
+                    interactionTracker.__agyPauseWrapped = true;
+                    interactionTracker.begin = function (params, ...rest) {
+                        const cKey = params?.cascadeId || interactionTracker.__agyCurrentCascadeKey || "__default_pane__";
                         const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
                         if (entry && (entry.status === "paused" || entry.status === "pausing")) {
                             return {
@@ -388,74 +535,15 @@ PAUSE_RENDERER_JS = r"""(() => {
                                 errored: () => {},
                             };
                         }
-                        return origBeginInteraction.call(this, params, ...rest);
-                    };
-                }
-
-                if (typeof origAppend === "function") {
-                    submitCtx.appendOptimisticUserMessage = function (params, options) {
-                        const cKey = params?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
-                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
-                        if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(params)) {
-                            entry.heldQueue.push({
-                                msgId: params?.clientMessageId || `held-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                                deliveryStrategy: 2,
-                                metadata: undefined,
-                                step: {
-                                    items: Array.isArray(params?.items) ? [...params.items] : [],
-                                    media: Array.isArray(params?.media) ? [...params.media] : [],
-                                    artifactComments: Array.isArray(params?.artifactComments) ? [...params.artifactComments] : [],
-                                    fileDiffComments: Array.isArray(params?.fileDiffComments) ? [...params.fileDiffComments] : [],
-                                    fileComments: Array.isArray(params?.fileComments) ? [...params.fileComments] : [],
-                                },
-                                queuedViaHook: true,
-                            });
-                            savePausedStateToStorage();
-                            scheduleSync();
-                            return {
-                                dispose: () => {},
-                                markAsFailed: () => {},
-                                hold: () => ({ dispose: () => {} }),
-                            };
-                        }
-                        return origAppend.call(this, params, options);
-                    };
-                }
-
-                if (typeof origSend === "function") {
-                    submitCtx.sendMessage = function (req, ...rest) {
-                        const cKey = req?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
-                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
-                        if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(req)) {
-                            const alreadyQueued = entry.heldQueue.some(q => q.queuedViaHook && q.msgId === req?.clientMessageId);
-                            if (!alreadyQueued && Array.isArray(req?.items) && (req.items.length > 0 || (req.media && req.media.length > 0))) {
-                                entry.heldQueue.push({
-                                    msgId: req?.clientMessageId || `held-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                                    deliveryStrategy: 2,
-                                    metadata: undefined,
-                                    step: {
-                                        items: [...req.items],
-                                        media: Array.isArray(req.media) ? [...req.media] : [],
-                                        artifactComments: Array.isArray(req.artifactComments) ? [...req.artifactComments] : [],
-                                        fileDiffComments: Array.isArray(req.fileDiffComments) ? [...req.fileDiffComments] : [],
-                                        fileComments: Array.isArray(req.fileComments) ? [...req.fileComments] : [],
-                                    },
-                                    queuedViaHook: true,
-                                });
-                                savePausedStateToStorage();
-                            }
-                            scheduleSync();
-                            return Promise.resolve({});
-                        }
-                        return origSend.call(this, req, ...rest);
+                        return origBegin.call(this, params, ...rest);
                     };
                 }
             }
         }
 
         if (lsClient && typeof lsClient === "object") {
-            if (info.cascadeKey) {
-                lsClient.__agyCurrentCascadeKey = info.cascadeKey;
+            if (cascadeKey) {
+                lsClient.__agyCurrentCascadeKey = cascadeKey;
             }
             if (!lsClient.__agyPauseWrapped) {
                 const origLsSend = lsClient.sendUserCascadeMessage;
@@ -466,6 +554,7 @@ PAUSE_RENDERER_JS = r"""(() => {
                         const cKey = req?.cascadeId || lsClient.__agyCurrentCascadeKey || "__default_pane__";
                         const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
                         if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(req)) {
+                            enqueueHeldMessage(entry, req);
                             scheduleSync();
                             return Promise.resolve({});
                         }
@@ -478,7 +567,7 @@ PAUSE_RENDERER_JS = r"""(() => {
 
     document.addEventListener("keydown", (ev) => {
         if (ev.key === "Enter" && !ev.shiftKey) {
-            const footerEl = document.querySelector(".agy-composer-footer");
+            const footerEl = ev.target?.closest?.('[data-testid="agent-input-box"]')?.querySelector?.(".agy-composer-footer") || document.querySelector(".agy-composer-footer");
             if (footerEl) {
                 const info = inspectFooterFiber(footerEl);
                 wrapSubmitContext(info);
@@ -487,7 +576,7 @@ PAUSE_RENDERER_JS = r"""(() => {
     }, true);
 
     document.addEventListener("click", (ev) => {
-        const footerEl = ev.target?.closest?.(".agy-composer-footer") || document.querySelector(".agy-composer-footer");
+        const footerEl = ev.target?.closest?.('[data-testid="agent-input-box"]')?.querySelector?.(".agy-composer-footer") || ev.target?.closest?.(".agy-composer-footer") || document.querySelector(".agy-composer-footer");
         const info = footerEl ? inspectFooterFiber(footerEl) : null;
         if (info) {
             wrapSubmitContext(info);
@@ -519,7 +608,7 @@ PAUSE_RENDERER_JS = r"""(() => {
         if (!fiber) return null;
         let root = fiber;
         let guard = 0;
-        while (root.return && guard < 120) {
+        while (root.return && guard < 2000) {
             root = root.return;
             guard++;
         }
@@ -554,7 +643,10 @@ PAUSE_RENDERER_JS = r"""(() => {
         let inputBoxProps = null;
         let stepHandlerCtx = null;
         let lsClient = null;
+        let optProvider = null;
+        let interactionTracker = null;
         let submitCtx = null;
+        const submitCtxList = [];
 
         const examineContextValue = (val) => {
             if (!val || typeof val !== "object") return;
@@ -564,13 +656,19 @@ PAUSE_RENDERER_JS = r"""(() => {
             if (!lsClient && typeof val.deleteAgentMessage === "function" && typeof val.sendUserCascadeMessage === "function") {
                 lsClient = val;
             }
+            if (!optProvider && typeof val.appendOptimisticUserMessage === "function" && val.registry && typeof val.registry.peek === "function") {
+                optProvider = val;
+            }
+            if (!interactionTracker && typeof val.begin === "function" && typeof val.dispose === "function") {
+                interactionTracker = val;
+            }
         };
 
         const examineFiberHooks = (fiberNode) => {
             if (!fiberNode) return;
             let hook = fiberNode.memoizedState;
             let hGuard = 0;
-            while (hook && hGuard < 250) {
+            while (hook && hGuard < 2000) {
                 const ms = hook.memoizedState;
                 const candidate = Array.isArray(ms) ? ms[0] : ms;
                 if (
@@ -582,7 +680,9 @@ PAUSE_RENDERER_JS = r"""(() => {
                     typeof candidate.inputControls.clearInput === "function"
                 ) {
                     if (!submitCtx) submitCtx = candidate;
-                    wrapSubmitContext({ cascadeKey: inputBoxProps?.cascadeId || "__default_pane__", submitCtx: candidate, lsClient });
+                    if (!submitCtxList.includes(candidate)) {
+                        submitCtxList.push(candidate);
+                    }
                 }
                 hook = hook.next;
                 hGuard++;
@@ -591,7 +691,7 @@ PAUSE_RENDERER_JS = r"""(() => {
 
         let curr = startFiber;
         let depth = 0;
-        while (curr && depth < 70) {
+        while (curr && depth < 300) {
             const mp = curr.memoizedProps;
             if (mp && typeof mp === "object") {
                 if (
@@ -620,7 +720,7 @@ PAUSE_RENDERER_JS = r"""(() => {
 
             let ctxDep = curr.dependencies?.firstContext;
             let cGuard = 0;
-            while (ctxDep && cGuard < 25) {
+            while (ctxDep && cGuard < 50) {
                 examineContextValue(ctxDep.memoizedValue);
                 examineContextValue(ctxDep.context?._currentValue);
                 ctxDep = ctxDep.next;
@@ -636,7 +736,7 @@ PAUSE_RENDERER_JS = r"""(() => {
         if (inputBoxFiber) {
             const queue = [inputBoxFiber.child];
             let visited = 0;
-            while (queue.length > 0 && visited < 120) {
+            while (queue.length > 0 && visited < 200) {
                 const node = queue.shift();
                 if (!node) continue;
                 visited++;
@@ -653,10 +753,25 @@ PAUSE_RENDERER_JS = r"""(() => {
         const rawCascadeId = inputBoxProps?.cascadeId || stepHandlerCtx?.cascadeContext?.state?.cascadeId || undefined;
         const cascadeKey = rawCascadeId || "__default_pane__";
 
-        return {
+        let trueIsRunning = null;
+        try {
+            const peeked = (rawCascadeId && optProvider?.registry?.peek) ? optProvider.registry.peek(rawCascadeId) : null;
+            const trueStatus = peeked?.trueState?.getState?.()?.agentState?.status;
+            if (typeof trueStatus === "number") {
+                trueIsRunning = (trueStatus === 2);
+            } else {
+                const stStatus = stepHandlerCtx?.cascadeContext?.state?.agentStateProvider?.getState?.()?.status;
+                if (typeof stStatus === "number") {
+                    trueIsRunning = (stStatus === 2);
+                }
+            }
+        } catch {}
+
+        const infoObj = {
             rawCascadeId,
             cascadeKey,
             isRunning: Boolean(inputBoxProps?.isRunning ?? footerProps?.isRunning),
+            trueIsRunning,
             isConvoLoading: Boolean(inputBoxProps?.isConvoLoading ?? footerProps?.isConvoLoading),
             isInputEmpty: Boolean(footerProps?.isConvoInputEmpty ?? true),
             hasAttachments: Boolean(footerProps?.hasAttachments ?? false),
@@ -666,9 +781,14 @@ PAUSE_RENDERER_JS = r"""(() => {
             lexicalRef: footerProps?.lexicalRef,
             stepHandlerCtx,
             lsClient,
+            optProvider,
+            interactionTracker,
             submitCtx,
+            submitCtxList,
             queuedUserInputs,
         };
+        wrapSubmitContext(infoObj);
+        return infoObj;
     }
 
     function capturePartialContext(info) {
@@ -1251,55 +1371,65 @@ PAUSE_RENDERER_JS = r"""(() => {
         footerEl.__agyLastCascadeKey = info.cascadeKey;
 
         let entry = pausedMap.get(info.cascadeKey);
+        const reallyRunning = (typeof info.trueIsRunning === "boolean") ? info.trueIsRunning : info.isRunning;
 
-        if (entry && entry.status === "pausing" && !info.isRunning) {
+        if (entry && (entry.status === "paused" || entry.status === "pausing") && !reallyRunning) {
+            clearPhantomOptimisticEffects(info);
+        }
+
+        if (entry && entry.status === "pausing" && !reallyRunning) {
             entry.status = "paused";
             entry.sawIdleAfterPause = true;
             entry.pausedAt = Date.now();
             savePausedStateToStorage();
         }
 
+        const flushHeldQueueAfterStart = (queueToFlush) => {
+            if (!Array.isArray(queueToFlush) || queueToFlush.length === 0) return;
+            void (async () => {
+                await new Promise(r => setTimeout(r, 150));
+                const latestInfo = inspectFooterFiber(footerEl) || info;
+                for (const qItem of queueToFlush) {
+                    const st = qItem.step || {};
+                    try {
+                        await dispatchItem(
+                            latestInfo,
+                            st.items || [],
+                            st.media || [],
+                            2, // WHEN_IDLE (Queue)
+                            {
+                                artifactComments: st.artifactComments || [],
+                                fileDiffComments: st.fileDiffComments || [],
+                                fileComments: st.fileComments || [],
+                            }
+                        );
+                    } catch (err) {
+                        console.error("[AntigravityPause] Error flushing preserved queue:", err);
+                    }
+                }
+            })();
+        };
+
         if (entry && entry.status === "paused") {
-            if (!info.isRunning) {
+            if (!reallyRunning) {
                 entry.sawIdleAfterPause = true;
             } else if (entry.sawIdleAfterPause && (Date.now() - entry.pausedAt > 800)) {
+                const queueToFlush = Array.isArray(entry.heldQueue) ? [...entry.heldQueue] : [];
                 pausedMap.delete(info.cascadeKey);
                 savePausedStateToStorage();
                 entry = undefined;
+                flushHeldQueueAfterStart(queueToFlush);
             }
         }
 
         // If user cancelled the paused prompt (keeping heldQueue) and then sent a new prompt directly,
         // flush the preserved heldQueue into language_server (WHEN_IDLE) so they run right after the new prompt finishes.
-        if (entry && entry.status === "cancelled" && info.isRunning) {
+        if (entry && entry.status === "cancelled" && reallyRunning) {
             const queueToFlush = Array.isArray(entry.heldQueue) ? [...entry.heldQueue] : [];
             pausedMap.delete(info.cascadeKey);
             savePausedStateToStorage();
             entry = undefined;
-            if (queueToFlush.length > 0) {
-                void (async () => {
-                    await new Promise(r => setTimeout(r, 150));
-                    const latestInfo = inspectFooterFiber(footerEl) || info;
-                    for (const qItem of queueToFlush) {
-                        const st = qItem.step || {};
-                        try {
-                            await dispatchItem(
-                                latestInfo,
-                                st.items || [],
-                                st.media || [],
-                                2, // WHEN_IDLE (Queue)
-                                {
-                                    artifactComments: st.artifactComments || [],
-                                    fileDiffComments: st.fileDiffComments || [],
-                                    fileComments: st.fileComments || [],
-                                }
-                            );
-                        } catch (err) {
-                            console.error("[AntigravityPause] Error flushing preserved queue:", err);
-                        }
-                    }
-                })();
-            }
+            flushHeldQueueAfterStart(queueToFlush);
         }
 
         syncHeldQueueCard(footerEl, info, entry);
