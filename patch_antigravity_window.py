@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 import argparse
 import ast
@@ -159,12 +159,26 @@ PAUSE_RENDERER_JS = r"""(() => {
                 opacity: 1;
                 transform: translateY(0);
             }
+            div[role="article"][aria-label="User message"][data-agy-hidden-resume="true"],
+            [data-testid="pending-user-messages"] > div[data-agy-hidden-resume="true"],
+            div[data-agy-hidden-turn-footer="true"] {
+                display: none !important;
+                min-height: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
         `;
         (document.head || document.documentElement).appendChild(style);
     }
 
     const PAUSE_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1.5"></rect><rect x="14" y="4" width="4" height="16" rx="1.5"></rect></svg>';
     const PLAY_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.8C7 3.98 7.9 3.48 8.6 3.92L19.4 10.72C20.05 11.13 20.05 12.07 19.4 12.48L8.6 19.28C7.9 19.72 7 19.22 7 18.4V4.8Z"></path></svg>';
+
+    const RESUME_PROMPT_EN = "Continue executing the previous prompt from the exact point where it was paused, without losing any context.";
+    const RESUME_PROMPT_PT_LEGACY = "Continue a execução do prompt anterior exatamente de onde parou, sem perder nada do contexto.";
+    const RESUME_TAG = "antigravity_pause_resume";
+    const CANCELLED_TEXT_ORIG = "User cancelled agent execution.";
+    const PAUSED_TEXT_REPLACEMENT = "The process has been paused.";
 
     // Map<cascadeId, { status: "pausing" | "paused" | "resuming", heldQueue: Array, capturedContext: Object | null, pausedAt: number }>
     const pausedMap = new Map();
@@ -322,7 +336,7 @@ PAUSE_RENDERER_JS = r"""(() => {
     }
 
     function buildResumePrompt(info, captured) {
-        const basePrompt = "Continue a execução do prompt anterior exatamente de onde parou, sem perder nada do contexto.";
+        const basePrompt = RESUME_PROMPT_EN;
         if (!captured || !Array.isArray(captured.tail) || captured.tail.length === 0) {
             return basePrompt;
         }
@@ -343,12 +357,12 @@ PAUSE_RENDERER_JS = r"""(() => {
             if (stillPresent) {
                 return basePrompt;
             }
-            const parts = [basePrompt, "[Contexto parcial recebido antes da pausa]:"];
+            const parts = [basePrompt, "[Partial context received before pause]:"];
             if (lastCaptured.thinking) {
-                parts.push("Raciocínio parcial:\n" + lastCaptured.thinking.slice(-2000));
+                parts.push("Partial reasoning:\n" + lastCaptured.thinking.slice(-2000));
             }
             if (lastCaptured.response) {
-                parts.push("Resposta parcial:\n" + lastCaptured.response.slice(-2000));
+                parts.push("Partial response:\n" + lastCaptured.response.slice(-2000));
             }
             return parts.join("\n\n");
         } catch {
@@ -468,6 +482,7 @@ PAUSE_RENDERER_JS = r"""(() => {
                 artifactComments: [],
                 fileDiffComments: [],
                 fileComments: [],
+                tags: [RESUME_TAG],
             });
 
             if (queueToRestore.length > 0) {
@@ -633,7 +648,142 @@ PAUSE_RENDERER_JS = r"""(() => {
         }
     }
 
+    function isResumeUserMessage(msgEl) {
+        if (!msgEl) return false;
+        const rawText = (msgEl.textContent || "").trim();
+        if (
+            rawText.startsWith(RESUME_PROMPT_EN) ||
+            rawText.startsWith(RESUME_PROMPT_PT_LEGACY)
+        ) {
+            return true;
+        }
+        const startFiber = getReactFiber(msgEl);
+        if (startFiber) {
+            const queue = [startFiber];
+            let visited = 0;
+            while (queue.length > 0 && visited < 20) {
+                const f = queue.shift();
+                if (!f) continue;
+                visited++;
+                const mp = f.memoizedProps;
+                if (mp && typeof mp === "object") {
+                    const tags = mp.step?.tags || mp.userStep?.step?.value?.tags;
+                    if (Array.isArray(tags) && tags.includes(RESUME_TAG)) {
+                        return true;
+                    }
+                    const items = mp.step?.items || mp.userStep?.step?.value?.items;
+                    if (Array.isArray(items)) {
+                        for (const it of items) {
+                            const val = (it?.chunk?.value || it?.text || "").trim();
+                            if (val.startsWith(RESUME_PROMPT_EN) || val.startsWith(RESUME_PROMPT_PT_LEGACY)) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                if (f.child) queue.push(f.child);
+                if (visited > 1 && f.sibling) queue.push(f.sibling);
+            }
+        }
+        return false;
+    }
+
+    function syncSessionDOM() {
+        // 1. Replace "User cancelled agent execution." with "The process has been paused."
+        const cancelNotices = document.querySelectorAll("div.text-secondary-foreground, [aria-live]");
+        for (let i = 0; i < cancelNotices.length; i++) {
+            const el = cancelNotices[i];
+            if (el.childNodes.length === 1 && el.firstChild && el.firstChild.nodeType === 3) {
+                if (el.firstChild.nodeValue === CANCELLED_TEXT_ORIG) {
+                    el.firstChild.nodeValue = PAUSED_TEXT_REPLACEMENT;
+                }
+            }
+        }
+
+        // 2. Hide internal continuation prompts from the session UI
+        const userMsgs = document.querySelectorAll('div[role="article"][aria-label="User message"]');
+        const resumeTurnOuters = new Set();
+
+        for (let i = 0; i < userMsgs.length; i++) {
+            const msgEl = userMsgs[i];
+            const isResume = isResumeUserMessage(msgEl);
+            const pendingRow = msgEl.closest('[data-testid="pending-user-messages"] > div');
+
+            if (isResume) {
+                if (msgEl.getAttribute("data-agy-hidden-resume") !== "true") {
+                    msgEl.setAttribute("data-agy-hidden-resume", "true");
+                }
+                if (pendingRow) {
+                    if (pendingRow.getAttribute("data-agy-hidden-resume") !== "true") {
+                        pendingRow.setAttribute("data-agy-hidden-resume", "true");
+                    }
+                } else {
+                    const turnInner = msgEl.parentElement;
+                    const turnOuter = turnInner ? turnInner.parentElement : null;
+                    if (turnOuter) {
+                        resumeTurnOuters.add(turnOuter);
+                    }
+                }
+            } else {
+                if (msgEl.hasAttribute("data-agy-hidden-resume")) {
+                    msgEl.removeAttribute("data-agy-hidden-resume");
+                }
+                if (pendingRow && pendingRow.hasAttribute("data-agy-hidden-resume")) {
+                    pendingRow.removeAttribute("data-agy-hidden-resume");
+                }
+            }
+        }
+
+        // Hide pending-user-messages container if all pending rows are hidden resume prompts
+        const pendingContainers = document.querySelectorAll('[data-testid="pending-user-messages"]');
+        for (let i = 0; i < pendingContainers.length; i++) {
+            const pc = pendingContainers[i];
+            const children = pc.children;
+            let anyVisible = false;
+            for (let j = 0; j < children.length; j++) {
+                if (children[j].getAttribute("data-agy-hidden-resume") !== "true") {
+                    anyVisible = true;
+                    break;
+                }
+            }
+            if (!anyVisible && children.length > 0) {
+                pc.style.setProperty("display", "none", "important");
+            } else {
+                pc.style.removeProperty("display");
+            }
+        }
+
+        // Hide intermediate turn feedback footer (div.pt-3) on turns that continue into a resumed turn
+        const prevHiddenFooters = document.querySelectorAll('div[data-agy-hidden-turn-footer="true"]');
+        for (let i = 0; i < prevHiddenFooters.length; i++) {
+            const footerDiv = prevHiddenFooters[i];
+            const turnOuter = footerDiv.parentElement?.parentElement;
+            const nextTurnOuter = turnOuter ? turnOuter.nextElementSibling : null;
+            if (!nextTurnOuter || !resumeTurnOuters.has(nextTurnOuter)) {
+                footerDiv.removeAttribute("data-agy-hidden-turn-footer");
+            }
+        }
+        for (const resumeOuter of resumeTurnOuters) {
+            const prevTurnOuter = resumeOuter.previousElementSibling;
+            if (prevTurnOuter) {
+                const prevInner = prevTurnOuter.firstElementChild;
+                if (prevInner) {
+                    const children = prevInner.children;
+                    for (let j = 0; j < children.length; j++) {
+                        const ch = children[j];
+                        if (ch.tagName === "DIV" && ch.classList.contains("pt-3")) {
+                            if (ch.getAttribute("data-agy-hidden-turn-footer") !== "true") {
+                                ch.setAttribute("data-agy-hidden-turn-footer", "true");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     function syncAllFooters() {
+        syncSessionDOM();
         const footers = document.querySelectorAll(".agy-composer-footer");
         for (let i = 0; i < footers.length; i++) {
             syncFooter(footers[i]);
@@ -642,6 +792,8 @@ PAUSE_RENDERER_JS = r"""(() => {
 
     let rafPending = false;
     function scheduleSync() {
+        // Run DOM text replacement and continuation-prompt hiding synchronously in microtask before paint
+        syncSessionDOM();
         if (rafPending) return;
         rafPending = true;
         requestAnimationFrame(() => {
@@ -654,6 +806,7 @@ PAUSE_RENDERER_JS = r"""(() => {
     observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
+        characterData: true,
         attributes: true,
         attributeFilter: ["class", "disabled", "data-testid", "aria-label"],
     });
@@ -1467,13 +1620,32 @@ def generate_patched_utils_js(original_code: str) -> str:
     return patched
 
 
-def generate_pause_patched_utils_js(original_code: str) -> str:
-    """Injects the Pause/Play prompt execution button into dist/utils.js via webContents."""
-    if PAUSE_PATCH_MARKER in original_code:
-        return original_code
+def is_pause_patch_up_to_date(code: str) -> bool:
+    """Checks whether the currently injected Pause/Play renderer script matches the latest version."""
+    if PAUSE_PATCH_MARKER not in code:
+        return False
+    expected_decl = f"const _ANTIGRAVITY_PAUSE_PLAY_SCRIPT = {json.dumps(PAUSE_RENDERER_JS)};"
+    return expected_decl in code
 
+
+def generate_pause_patched_utils_js(original_code: str) -> str:
+    """Injects or updates the Pause/Play prompt execution button in dist/utils.js via webContents."""
     encoded_script = json.dumps(PAUSE_RENDERER_JS)
-    pause_prelude = f"\n{PAUSE_PATCH_MARKER}\nconst _ANTIGRAVITY_PAUSE_PLAY_SCRIPT = {encoded_script};\n"
+    expected_decl = f"const _ANTIGRAVITY_PAUSE_PLAY_SCRIPT = {encoded_script};"
+
+    if PAUSE_PATCH_MARKER in original_code:
+        if expected_decl in original_code:
+            return original_code
+        updated = re.sub(
+            r"const\s+_ANTIGRAVITY_PAUSE_PLAY_SCRIPT\s*=\s*[^\r\n]+",
+            lambda _: expected_decl,
+            original_code,
+            count=1,
+        )
+        if expected_decl in updated:
+            return updated
+
+    pause_prelude = f"\n{PAUSE_PATCH_MARKER}\n{expected_decl}\n"
 
     pause_listeners = f"""    {PAUSE_PATCH_MARKER}
     const _injectAntigravityPausePlay = () => {{
@@ -1521,14 +1693,15 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
         is_native = is_native_window_persistence_supported(app_paths, code)
         has_window_patch = PATCH_MARKER in code
         has_pause_patch = PAUSE_PATCH_MARKER in code
+        pause_up_to_date = is_pause_patch_up_to_date(code)
 
         need_window_patch = (not is_native) and (not has_window_patch)
-        need_pause_patch = add_pause and (not has_pause_patch)
+        need_pause_patch = add_pause and (not pause_up_to_date)
 
         if not need_window_patch and not need_pause_patch:
             app_ver = extract_app_version_from_dir(app_paths.app_dir)
-            if add_pause and has_pause_patch:
-                log_warn("Pause/Play button patch (--add-pause) is already applied to this installation!")
+            if add_pause and pause_up_to_date:
+                log_warn("Pause/Play button patch (--add-pause) is already applied and up to date!")
                 return
             if is_native:
                 log_success(f"Detected Antigravity v{app_ver} ({app_paths.app_root}).")
@@ -1549,7 +1722,10 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
             log("Injecting geometry persistence logic into dist/utils.js...")
             patched_code = generate_patched_utils_js(patched_code)
         if need_pause_patch:
-            log("Injecting Pause/Play prompt execution button logic (--add-pause) into dist/utils.js...")
+            if has_pause_patch:
+                log("Updating Pause/Play prompt execution button logic (--add-pause) in dist/utils.js...")
+            else:
+                log("Injecting Pause/Play prompt execution button logic (--add-pause) into dist/utils.js...")
             patched_code = generate_pause_patched_utils_js(patched_code)
 
         if is_app_running(app_paths):
@@ -1604,13 +1780,14 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
     is_native = is_native_window_persistence_supported(header, original_utils_code)
     has_window_patch = PATCH_MARKER in original_utils_code
     has_pause_patch = PAUSE_PATCH_MARKER in original_utils_code
+    pause_up_to_date = is_pause_patch_up_to_date(original_utils_code)
 
     need_window_patch = (not is_native) and (not has_window_patch)
-    need_pause_patch = add_pause and (not has_pause_patch)
+    need_pause_patch = add_pause and (not pause_up_to_date)
 
     if not need_window_patch and not need_pause_patch:
-        if add_pause and has_pause_patch:
-            log_warn("Pause/Play button patch (--add-pause) is already applied to this installation!")
+        if add_pause and pause_up_to_date:
+            log_warn("Pause/Play button patch (--add-pause) is already applied and up to date!")
             if is_native:
                 log_success(f"Native window state persistence is also active (v{app_version}).")
             elif has_window_patch:
@@ -1643,7 +1820,10 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
         log_success(f"Antigravity v{app_version} natively persists window geometry; keeping native window state manager intact.")
 
     if need_pause_patch:
-        log("Injecting Pause/Play prompt execution button logic (--add-pause)...")
+        if has_pause_patch:
+            log("Updating Pause/Play prompt execution button logic (--add-pause)...")
+        else:
+            log("Injecting Pause/Play prompt execution button logic (--add-pause)...")
         patched_utils_code = generate_pause_patched_utils_js(patched_utils_code)
 
     patched_utils_bytes = patched_utils_code.encode("utf-8")
