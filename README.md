@@ -1,8 +1,8 @@
 <div align="center">
 
-# 🪟 Antigravity Window Size Persistence
+# ⏯️ Antigravity Pause / Play & Window Utility
 
-**Cross-platform utility to persist and restore Google Antigravity window geometry across launches.**
+**Pause and resume live agentic prompts in Google Antigravity without losing context or queued messages — plus automatic window geometry persistence for legacy builds.**
 
 <a href="https://github.com" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-24292e?style=for-the-badge&logo=apple&logoColor=white" alt="Platform: macOS | Windows | Linux" /></a>
 <a href="https://python.org" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Python-3.8%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.8+" /></a>
@@ -11,11 +11,12 @@
 
 <p align="center">
   <a href="#-overview">Overview</a> •
-  <a href="#-how-it-works">How It Works</a> •
+  <a href="#️-pause--play-prompt-execution---add-pause">Pause / Play</a> •
+  <a href="#️-how-it-works">How It Works</a> •
   <a href="#-features">Features</a> •
   <a href="#-quick-start">Quick Start</a> •
-  <a href="#-cli-reference">CLI Reference</a> •
-  <a href="#-restoring-factory-state">Restoration</a> •
+  <a href="#️-cli-reference">CLI Reference</a> •
+  <a href="#️-restoring-factory-state">Restoration</a> •
   <a href="#-macos-security--keychain-notice">macOS Notice</a> •
   <a href="#-author">Author</a>
 </p>
@@ -26,12 +27,36 @@
 
 ## 📖 Overview
 
-By default, **Google Antigravity** resets its window to `1400×900` on launch. This utility modifies `dist/utils.js` inside `app.asar` to automatically persist:
-- 📐 **Dimensions** (width and height).
-- 📍 **Position** ($x$, $y$) with off-screen multi-monitor safety.
-- 🔲 **Maximized state**.
+When running complex agentic tasks in **Google Antigravity**, standard controls only let you **Cancel** execution or **Queue** follow-up messages — and cancelling a running prompt normally flushes or disrupts your queued workflow.
+
+This utility enhances Google Antigravity with a dedicated **Pause / Play (`--add-pause`)** execution controller directly inside the prompt composer footer:
+- ⏸️ **Pause at Any Moment**: Freezes the currently executing prompt right where it is, displaying *"The process has been paused."*
+- 🛡️ **Preserves Your Queue (`Queued Messages`)**: Holds all queued prompts untouched while paused so they are not prematurely consumed or lost.
+- ▶️ **Seamless Resume (`Play`)**: Continues execution from the exact point where it stopped without clearing whatever draft text you have typed in the input box, keeping the internal continuation prompt completely hidden from the session UI so the AI response flows seamlessly.
+- 🪟 **Window State Persistence (Legacy Support)**: For versions prior to v2.29.0, automatically persists window dimensions, position, and maximized state (on v2.29.0+, Antigravity's native window state manager is preserved intact).
 
 Runs standalone via Python 3 with **zero external dependencies**.
+
+---
+
+## ⏯️ Pause / Play Prompt Execution (`--add-pause`)
+
+By default, the right side of Antigravity's prompt box shows either **`Cancel`** (when the input box is empty) or **`Queue message`** (when you have typed a follow-up prompt).
+
+With `--add-pause`, a contextual third button is injected right beside `Queue message` / `Cancel`:
+
+1. **Displayed Exclusively When Needed**:
+   - Hidden when the session is idle.
+   - Appears as **`Pause`** (amber) exclusively while a prompt is actively executing.
+   - Switches to **`Play`** (emerald, with a counter badge if queued messages are held) while paused.
+2. **In-Flight Context & Queue Snapshot on `Pause`**:
+   - Captures any in-flight partial reasoning/response from the active `trajectorySlice` before halting the invocation.
+   - Snapshots and holds all pending items in `Queued Messages` (`WHEN_IDLE`) so the backend does not auto-fire them while you are paused.
+   - Replaces the default cancellation text with **`The process has been paused.`**
+3. **Zero-Friction Resume on `Play`**:
+   - Dispatches an internal US English continuation instruction (`NEXT_INVOCATION`) via the non-composer channel so **your current input draft is never cleared**.
+   - Automatically hides the internal continuation prompt and intermediate turn dividers from the conversation UI, merging the resumed output into a continuous visual response.
+   - Re-queues all held `Queued Messages` (`WHEN_IDLE`) in their exact original order as soon as execution resumes.
 
 ---
 
@@ -39,30 +64,25 @@ Runs standalone via Python 3 with **zero external dependencies**.
 
 ```mermaid
 flowchart LR
-    A["🔍 Detect App"] --> B["💾 Backup app.asar"] --> C["⚡ Inject Persistence"] --> D["🔨 Rebuild & Sign"] --> E["🚀 Auto-Restore"]
+    A["▶️ Prompt Running"] --> B["⏸️ Click Pause"]
+    B --> C["💾 Snapshot Context & Hold Queue"]
+    C --> D["❄️ Paused ('The process has been paused.')"]
+    D --> E["▶️ Click Play"]
+    E --> F["🚀 Resume Context (Hidden Turn) & Restore Queue"]
 ```
-
-1. **Auto-detects** Antigravity on macOS, Windows, or Linux.
-2. **Backs up** original `app.asar` (`app.asar.orig`) and saves version metadata.
-3. **Injects** debounced window geometry handlers into `dist/utils.js`.
-4. **Restores** your exact window layout on every launch.
 
 ---
 
 ## ✨ Features
 
-- 🖥️ **Multi-Monitor Safe**: If a display is disconnected, the window shifts safely to an active screen.
-- ⏱️ **Debounced Saving**: Geometry writes to native `app_storage.json` without lag (250ms debounce).
-- 🔄 **Seamless App Updates**: Single-command `--update` applies new Google releases and reapplies persistence automatically.
-- 🚀 **Self-Updating**: Keep this patcher up to date with a single `--selfupdate` command from GitHub.
-- 🛡️ **Intelligent Downgrade Guard**: Tracks version and ASAR hashes to prevent `--restore` from downgrading your app after an official update.
-- 🐧 **Linux Desktop Integration**: Automatically generates `.desktop` shortcuts with official icon for system application menu.
-- ⏸️ **Pause / Play Prompt Execution (`--add-pause`)**: Injects a contextual **Pause / Play** button right next to `Queue message` / `Cancel` inside the composer footer. Allows pausing an active agentic prompt, holding any queued messages (`Queued Messages` / `WHEN_IDLE`) untouched while paused, and seamlessly resuming from the exact checkpoint on **Play**.
-- 🔏 **Platform Compliant**: Full cross-platform support for macOS (`codesign`), Windows paths/NSIS, and Linux.
-
-> [!NOTE]
-> **Antigravity v2.29.0+ Native Support:**
-> Starting with version 2.29.0, Google officially integrated native window geometry persistence (`dist/windowState.js`). This tool automatically detects this feature and operates seamlessly across all versions: it preserves the stock window manager on v2.29.0+ while continuing to inject persistence on legacy versions (v2.26 - v2.28), and allows injecting the `--add-pause` button on any version (including v2.29.0+).
+- ⏯️ **Pause & Resume Agentic Prompts (`--add-pause`)**: Pause active executions, inspect intermediate changes, and resume with one click without losing context.
+- 📥 **Queue Preservation**: Protects `Queued Messages` (`WHEN_IDLE`) across pauses and automatically restores them in order after resuming.
+- 👻 **Clean Session UI**: Hides internal resume prompts from the chat timeline and replaces *"User cancelled agent execution."* with *"The process has been paused."*
+- 🔄 **Seamless App Updates (`--update`)**: Installs new official Google releases and automatically reapplies your active patches (`--add-pause` and/or window persistence).
+- 🚀 **Self-Updating (`--selfupdate`)**: Pulls the latest version of this tool directly from GitHub.
+- 🛡️ **Intelligent Downgrade Guard**: Tracks version and SHA-256 ASAR hashes to prevent `--restore` from downgrading your app after an official update.
+- 🐧 **Linux Desktop Integration**: Automatically generates `.desktop` shortcuts with the official icon for the system application menu.
+- 🪟 **Legacy Window Geometry Persistence**: Automatically saves and restores window size, multi-monitor coordinates, and maximized state on Antigravity versions `< v2.29.0` (while keeping native `windowState.js` intact on `v2.29.0+`).
 
 ---
 
@@ -71,23 +91,20 @@ flowchart LR
 Run from your terminal (use `python` on Windows, `python3` on macOS/Linux):
 
 ```bash
-# Check current status
-python3 patch_antigravity_window.py --status
+# Enable the Pause/Play prompt button (and close Antigravity automatically to apply):
+python3 patch_antigravity_window.py --add-pause --kill
 
-# Apply the patch (prompts if Antigravity is running)
-python3 patch_antigravity_window.py
-
-# Apply with the Pause/Play prompt execution button enabled:
+# Or apply interactively (prompts if Antigravity is running):
 python3 patch_antigravity_window.py --add-pause
 
-# Or apply and close Antigravity automatically:
-python3 patch_antigravity_window.py --add-pause --kill
+# Check current patch & version status:
+python3 patch_antigravity_window.py --status
 ```
 
 > [!TIP]
 > **Convenience runners:**
-> - **Windows**: `.\run.bat --kill` *(or `.\run.ps1 --kill` in PowerShell)*
-> - **Linux / macOS**: `./run.sh --kill` *(use `sudo ./run.sh` only if installed in a system directory like `/opt`)*
+> - **Linux / macOS**: `./run.sh --add-pause --kill` *(use `sudo ./run.sh` only if installed in a system directory like `/opt`)*
+> - **Windows**: `.\run.bat --add-pause --kill` *(or `.\run.ps1 --add-pause --kill` in PowerShell)*
 
 ---
 
@@ -95,33 +112,33 @@ python3 patch_antigravity_window.py --add-pause --kill
 
 | Option | Argument | Description |
 |---|---|---|
-| *(none)* | — | Applies the persistence patch to the detected installation. |
-| `--add-pause` | — | Injects a contextual `Pause` / `Play` button next to `Queue message` / `Cancel` to pause and resume running prompts while preserving queued messages. |
-| `-v`, `--version` | — | Shows program version number and exits. |
-| `--status` | — | Checks if the patch is active on `app.asar` and detects pending updates. |
-| `--update` | — | Installs pending official updates downloaded by Antigravity and automatically re-patches. |
+| `--add-pause` | — | **Recommended:** Injects or updates the contextual `Pause` / `Play` button next to `Queue message` / `Cancel` to pause and resume running prompts while preserving queued messages. |
+| *(none)* | — | Applies legacy window geometry persistence (on `< v2.29.0`) or checks native window state support (`v2.29.0+`). |
+| `--status` | — | Displays current status of the `Pause / Play` button, window persistence, and pending official updates. |
+| `--update` | — | Installs pending official updates downloaded by Antigravity and automatically re-applies active patches. |
 | `--selfupdate` | — | Updates `Antigravity-IDE-WindowSize` itself to the latest version from GitHub. |
-| `--shortcut` | — | Creates or refreshes Linux desktop shortcut (`.desktop`) and application menu entry. |
 | `--restore`, `--undo` | — | Restores the stock factory `app.asar` from backup. |
-| `--force`, `--force-restore` | — | Overrides the downgrade protection and forces restoration even if an update was detected. |
-| `--kill` | — | Terminates Antigravity if currently running before patching or updating. |
+| `--force`, `--force-restore` | — | Overrides the downgrade protection and forces restoration even if an official update was detected. |
+| `--kill` | — | Automatically terminates Antigravity if currently running before patching or updating. |
+| `--shortcut` | — | Creates or refreshes the Linux desktop shortcut (`.desktop`) and application menu entry. |
 | `--app` | `<path>` | Custom path to Antigravity folder, executable, or `app.asar`. |
+| `-v`, `--version` | — | Shows program version number and exits. |
 
 ---
 
 ## 🔄 Updates Workflow
 
 ### Updating Antigravity IDE
-When Google pushes a new release, Antigravity downloads it in the background. Because packaged modifications disable in-app restarts on macOS, simply run:
+When Google releases a new version, Antigravity downloads it in the background. Because packaged modifications disable in-app restarts on macOS, simply run:
 
 ```bash
 # macOS / Linux:
-./run.sh --update --kill
+./run.sh --update --add-pause --kill
 
 # Windows:
-.\run.bat --update --kill
+.\run.bat --update --add-pause --kill
 ```
-This detects the cached official update, installs it cleanly, and immediately re-enables window persistence.
+*(Note: If `--add-pause` was already active before the update, `--update` automatically detects and preserves it even without passing `--add-pause` again.)*
 
 ### Updating This Tool
 To pull the latest version of `patch_antigravity_window.py` from GitHub:
