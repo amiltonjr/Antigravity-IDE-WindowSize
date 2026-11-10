@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.2.4"
+__version__ = "1.3.0"
 
 import argparse
 import ast
@@ -58,6 +58,609 @@ if sys.platform == "win32":
         pass
 
 PATCH_MARKER = "/* __ANTIGRAVITY_WINDOW_PERSISTENCE_PATCH_V1__ */"
+PAUSE_PATCH_MARKER = "/* __ANTIGRAVITY_PAUSE_BUTTON_PATCH_V1__ */"
+
+PAUSE_RENDERER_JS = r"""(() => {
+    if (window.__agyPausePlayControllerInstalled) return;
+    window.__agyPausePlayControllerInstalled = true;
+
+    const STYLE_ID = "agy-pause-play-styles";
+    if (!document.getElementById(STYLE_ID)) {
+        const style = document.createElement("style");
+        style.id = STYLE_ID;
+        style.textContent = `
+            .agy-pause-play-slot {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                margin-left: 4px;
+                position: relative;
+                flex-shrink: 0;
+            }
+            .agy-pause-play-slot[data-hidden="true"] {
+                display: none !important;
+            }
+            .agy-pause-play-btn {
+                width: 28px;
+                height: 28px;
+                border-radius: 9999px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                transition: opacity 150ms ease, transform 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+                border: none;
+                outline: none;
+                padding: 0;
+                position: relative;
+                flex-shrink: 0;
+            }
+            .agy-pause-play-btn[data-mode="pause"] {
+                background-color: var(--color-secondary, rgba(128, 128, 128, 0.2));
+                color: #f59e0b;
+            }
+            .agy-pause-play-btn[data-mode="play"] {
+                background-color: #10b981;
+                color: #ffffff;
+                box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.25);
+            }
+            .agy-pause-play-btn:hover:not(:disabled) {
+                opacity: 0.92;
+                transform: scale(1.05);
+            }
+            .agy-pause-play-btn:active:not(:disabled) {
+                transform: scale(0.95);
+            }
+            .agy-pause-play-btn:disabled {
+                opacity: 0.5;
+                cursor: wait;
+            }
+            .agy-pause-play-badge {
+                position: absolute;
+                top: -4px;
+                right: -4px;
+                min-width: 14px;
+                height: 14px;
+                padding: 0 3px;
+                border-radius: 9999px;
+                background-color: #3b82f6;
+                color: #ffffff;
+                font-size: 9px;
+                font-weight: 600;
+                line-height: 14px;
+                text-align: center;
+                pointer-events: none;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+            }
+            .agy-pause-play- badge[data-empty="true"],
+            .agy-pause-play-badge[data-empty="true"] {
+                display: none !important;
+            }
+            .agy-pause-play-tooltip {
+                position: absolute;
+                bottom: calc(100% + 7px);
+                right: 0;
+                background-color: var(--color-popover, #1e1e1e);
+                color: var(--color-popover-foreground, #f5f5f5);
+                border: 1px solid var(--color-border, rgba(255, 255, 255, 0.12));
+                padding: 4px 8px;
+                border-radius: 6px;
+                font-size: 11px;
+                line-height: 1.3;
+                white-space: nowrap;
+                pointer-events: none;
+                opacity: 0;
+                transform: translateY(2px);
+                transition: opacity 120ms ease, transform 120ms ease;
+                z-index: 9999;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+            }
+            .agy-pause-play-slot:hover .agy-pause-play-tooltip {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    const PAUSE_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1.5"></rect><rect x="14" y="4" width="4" height="16" rx="1.5"></rect></svg>';
+    const PLAY_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.8C7 3.98 7.9 3.48 8.6 3.92L19.4 10.72C20.05 11.13 20.05 12.07 19.4 12.48L8.6 19.28C7.9 19.72 7 19.22 7 18.4V4.8Z"></path></svg>';
+
+    // Map<cascadeId, { status: "pausing" | "paused" | "resuming", heldQueue: Array, capturedContext: Object | null, pausedAt: number }>
+    const pausedMap = new Map();
+
+    function getReactFiber(el) {
+        if (!el || typeof el !== "object") return null;
+        for (const k of Object.keys(el)) {
+            if (k.startsWith("__reactFiber$")) return el[k];
+        }
+        return null;
+    }
+
+    function cloneQueuedInputs(list) {
+        if (!Array.isArray(list) || list.length === 0) return [];
+        return list.map(item => ({
+            msgId: item?.msgId,
+            deliveryStrategy: item?.deliveryStrategy,
+            metadata: item?.metadata,
+            step: item?.step ? {
+                items: Array.isArray(item.step.items) ? [...item.step.items] : [],
+                media: Array.isArray(item.step.media) ? [...item.step.media] : [],
+                artifactComments: Array.isArray(item.step.artifactComments) ? [...item.step.artifactComments] : [],
+                fileDiffComments: Array.isArray(item.step.fileDiffComments) ? [...item.step.fileDiffComments] : [],
+                fileComments: Array.isArray(item.step.fileComments) ? [...item.step.fileComments] : [],
+            } : { items: [], media: [], artifactComments: [], fileDiffComments: [], fileComments: [] }
+        }));
+    }
+
+    function inspectFooterFiber(footerEl) {
+        const startFiber = getReactFiber(footerEl);
+        if (!startFiber) return null;
+
+        let footerProps = null;
+        let inputBoxFiber = null;
+        let inputBoxProps = null;
+        let stepHandlerCtx = null;
+        let lsClient = null;
+
+        const examineContextValue = (val) => {
+            if (!val || typeof val !== "object") return;
+            if (!stepHandlerCtx && typeof val.sendMessage === "function" && val.cascadeContext) {
+                stepHandlerCtx = val;
+            }
+            if (!lsClient && typeof val.deleteAgentMessage === "function" && typeof val.sendUserCascadeMessage === "function") {
+                lsClient = val;
+            }
+        };
+
+        let curr = startFiber;
+        let depth = 0;
+        while (curr && depth < 70) {
+            const mp = curr.memoizedProps;
+            if (mp && typeof mp === "object") {
+                if (
+                    !footerProps &&
+                    typeof mp.cancelInvocation === "function" &&
+                    typeof mp.isRunning === "boolean" &&
+                    "isConvoInputEmpty" in mp
+                ) {
+                    footerProps = mp;
+                }
+                if (
+                    !inputBoxProps &&
+                    typeof mp.handleSubmit === "function" &&
+                    typeof mp.cancelInvocation === "function" &&
+                    "cascadeId" in mp
+                ) {
+                    inputBoxFiber = curr;
+                    inputBoxProps = mp;
+                }
+                if ("value" in mp) {
+                    examineContextValue(mp.value);
+                }
+            }
+            let ctxDep = curr.dependencies?.firstContext;
+            let cGuard = 0;
+            while (ctxDep && cGuard < 25) {
+                examineContextValue(ctxDep.memoizedValue);
+                examineContextValue(ctxDep.context?._currentValue);
+                ctxDep = ctxDep.next;
+                cGuard++;
+            }
+            curr = curr.return;
+            depth++;
+        }
+
+        if (!footerProps && !inputBoxProps) return null;
+
+        let queuedUserInputs = [];
+        if (inputBoxFiber) {
+            const queue = [inputBoxFiber.child];
+            let visited = 0;
+            while (queue.length > 0 && visited < 120) {
+                const node = queue.shift();
+                if (!node) continue;
+                visited++;
+                const nProps = node.memoizedProps;
+                if (nProps && Array.isArray(nProps.queuedUserInputs)) {
+                    queuedUserInputs = nProps.queuedUserInputs;
+                    break;
+                }
+                if (node.child) queue.push(node.child);
+                if (node.sibling) queue.push(node.sibling);
+            }
+        }
+
+        const rawCascadeId = inputBoxProps?.cascadeId || stepHandlerCtx?.cascadeContext?.state?.cascadeId || undefined;
+        const cascadeKey = rawCascadeId || "__default_pane__";
+
+        return {
+            rawCascadeId,
+            cascadeKey,
+            isRunning: Boolean(inputBoxProps?.isRunning ?? footerProps?.isRunning),
+            isConvoLoading: Boolean(inputBoxProps?.isConvoLoading ?? footerProps?.isConvoLoading),
+            isInputEmpty: Boolean(footerProps?.isConvoInputEmpty ?? true),
+            cancelInvocation: inputBoxProps?.cancelInvocation || footerProps?.cancelInvocation,
+            handleSubmit: inputBoxProps?.handleSubmit,
+            footerHandleSubmit: footerProps?.handleSubmit,
+            lexicalRef: footerProps?.lexicalRef,
+            stepHandlerCtx,
+            lsClient,
+            queuedUserInputs,
+        };
+    }
+
+    function capturePartialContext(info) {
+        try {
+            const state = info.stepHandlerCtx?.cascadeContext?.state?.agentStateProvider?.getState?.();
+            const slice = state?.trajectorySlice;
+            const steps = slice?.stepsInSlice;
+            if (!Array.isArray(steps) || steps.length === 0) return null;
+            const tail = [];
+            for (let i = Math.max(0, steps.length - 3); i < steps.length; i++) {
+                const st = steps[i];
+                if (!st || !st.step) continue;
+                if (st.step.case === "plannerResponse" && st.step.value) {
+                    const resp = (st.step.value.response || "").trim();
+                    const think = (st.step.value.thinking || "").trim();
+                    if (resp || think) {
+                        tail.push({
+                            status: st.status,
+                            response: resp,
+                            thinking: think,
+                        });
+                    }
+                }
+            }
+            return {
+                totalStepsLength: slice?.totalStepsLength ?? steps.length,
+                tail,
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    function buildResumePrompt(info, captured) {
+        const basePrompt = "Continue a execução do prompt anterior exatamente de onde parou, sem perder nada do contexto.";
+        if (!captured || !Array.isArray(captured.tail) || captured.tail.length === 0) {
+            return basePrompt;
+        }
+        try {
+            const stateAfter = info.stepHandlerCtx?.cascadeContext?.state?.agentStateProvider?.getState?.();
+            const stepsAfter = stateAfter?.trajectorySlice?.stepsInSlice || [];
+            const lastCaptured = captured.tail[captured.tail.length - 1];
+            if (!lastCaptured || (!lastCaptured.response && !lastCaptured.thinking)) {
+                return basePrompt;
+            }
+            const stillPresent = stepsAfter.some(s => {
+                if (s?.step?.case !== "plannerResponse" || !s.step.value) return false;
+                const r = (s.step.value.response || "").trim();
+                const t = (s.step.value.thinking || "").trim();
+                return (lastCaptured.response && r === lastCaptured.response) ||
+                       (lastCaptured.thinking && t === lastCaptured.thinking);
+            });
+            if (stillPresent) {
+                return basePrompt;
+            }
+            const parts = [basePrompt, "[Contexto parcial recebido antes da pausa]:"];
+            if (lastCaptured.thinking) {
+                parts.push("Raciocínio parcial:\n" + lastCaptured.thinking.slice(-2000));
+            }
+            if (lastCaptured.response) {
+                parts.push("Resposta parcial:\n" + lastCaptured.response.slice(-2000));
+            }
+            return parts.join("\n\n");
+        } catch {
+            return basePrompt;
+        }
+    }
+
+    async function handlePauseClick(footerEl) {
+        const info = inspectFooterFiber(footerEl);
+        if (!info || !info.isRunning || typeof info.cancelInvocation !== "function") return;
+
+        const key = info.cascadeKey;
+        const snapshotQueue = cloneQueuedInputs(info.queuedUserInputs);
+        const capturedContext = capturePartialContext(info);
+
+        pausedMap.set(key, {
+            status: "pausing",
+            heldQueue: snapshotQueue,
+            capturedContext,
+            pausedAt: Date.now(),
+        });
+        syncFooter(footerEl);
+
+        try {
+            await info.cancelInvocation();
+        } catch (err) {
+            console.error("[AntigravityPause] Error pausing invocation:", err);
+        }
+
+        const currentEntry = pausedMap.get(key);
+        if (currentEntry) {
+            const postInfo = inspectFooterFiber(footerEl);
+            const postQueue = cloneQueuedInputs(postInfo?.queuedUserInputs);
+            currentEntry.status = "paused";
+            if (postQueue.length > 0) {
+                currentEntry.heldQueue = postQueue;
+            }
+        }
+        syncFooter(footerEl);
+    }
+
+    async function dispatchItem(info, items, media, deliveryStrategy, commentOverrides) {
+        const comments = commentOverrides || {
+            artifactComments: [],
+            fileDiffComments: [],
+            fileComments: [],
+        };
+        if (info.stepHandlerCtx && typeof info.stepHandlerCtx.sendMessage === "function" && info.rawCascadeId) {
+            return await info.stepHandlerCtx.sendMessage({
+                type: 1,
+                source: "mcp",
+                cascadeId: info.rawCascadeId,
+                items,
+                media: media || [],
+                deliveryStrategy,
+                commentOverrides: comments,
+            });
+        }
+        if (typeof info.handleSubmit === "function") {
+            const editor = info.lexicalRef?.current;
+            const savedState = (!info.isInputEmpty && editor && typeof editor.getEditorState === "function")
+                ? editor.getEditorState()
+                : null;
+            const res = await info.handleSubmit(
+                items,
+                media || [],
+                () => {},
+                undefined,
+                deliveryStrategy,
+                comments
+            );
+            if (savedState && editor && typeof editor.setEditorState === "function") {
+                try { editor.setEditorState(savedState); } catch {}
+            }
+            return res;
+        }
+    }
+
+    async function handlePlayClick(footerEl) {
+        const info = inspectFooterFiber(footerEl);
+        if (!info) return;
+
+        const key = info.cascadeKey;
+        const entry = pausedMap.get(key);
+        if (!entry || entry.status !== "paused") return;
+
+        entry.status = "resuming";
+        syncFooter(footerEl);
+
+        try {
+            const liveQueue = cloneQueuedInputs(info.queuedUserInputs);
+            const queueToRestore = liveQueue.length > 0 ? liveQueue : (entry.heldQueue || []);
+
+            // Temporarily remove live queued items from language_server before sending the continuation prompt
+            // so they remain untouched and are re-queued right after the resumed turn starts running.
+            if (liveQueue.length > 0 && info.lsClient && typeof info.lsClient.deleteAgentMessage === "function" && info.rawCascadeId) {
+                for (const qItem of liveQueue) {
+                    if (qItem.msgId) {
+                        try {
+                            await info.lsClient.deleteAgentMessage({
+                                messageId: qItem.msgId,
+                                recipient: info.rawCascadeId,
+                            });
+                        } catch {}
+                    }
+                }
+                await new Promise(r => setTimeout(r, 75));
+            }
+
+            const resumeText = buildResumePrompt(info, entry.capturedContext);
+            const resumeItems = [{
+                $typeName: "exa.codeium_common_pb.TextOrScopeItem",
+                chunk: { case: "text", value: resumeText },
+            }];
+
+            await dispatchItem(info, resumeItems, [], 1, {
+                artifactComments: [],
+                fileDiffComments: [],
+                fileComments: [],
+            });
+
+            if (queueToRestore.length > 0) {
+                const waitStart = Date.now();
+                while (Date.now() - waitStart < 4500) {
+                    const latest = inspectFooterFiber(footerEl);
+                    if (latest && latest.isRunning) break;
+                    await new Promise(r => setTimeout(r, 60));
+                }
+                await new Promise(r => setTimeout(r, 120));
+                const latestInfo = inspectFooterFiber(footerEl) || info;
+                for (const qItem of queueToRestore) {
+                    const st = qItem.step || {};
+                    await dispatchItem(
+                        latestInfo,
+                        st.items || [],
+                        st.media || [],
+                        2, // WHEN_IDLE (Queue)
+                        {
+                            artifactComments: st.artifactComments || [],
+                            fileDiffComments: st.fileDiffComments || [],
+                            fileComments: st.fileComments || [],
+                        }
+                    );
+                }
+            }
+        } catch (err) {
+            console.error("[AntigravityPause] Error resuming execution:", err);
+        } finally {
+            pausedMap.delete(key);
+            syncFooter(footerEl);
+        }
+    }
+
+    function ensureSlot(footerEl) {
+        const rightContainer = footerEl.lastElementChild;
+        if (!rightContainer) return null;
+
+        let slot = rightContainer.querySelector(":scope > .agy-pause-play-slot");
+        if (!slot) {
+            slot = document.createElement("div");
+            slot.className = "agy-pause-play-slot";
+            slot.setAttribute("data-hidden", "true");
+
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "agy-pause-play-btn";
+            btn.setAttribute("data-mode", "pause");
+            btn.setAttribute("data-testid", "input-pause-button");
+            btn.innerHTML = PAUSE_SVG;
+
+            const badge = document.createElement("span");
+            badge.className = "agy-pause-play-badge";
+            badge.setAttribute("data-empty", "true");
+            btn.appendChild(badge);
+
+            const tooltip = document.createElement("div");
+            tooltip.className = "agy-pause-play-tooltip";
+            tooltip.textContent = "Pause execution";
+
+            btn.addEventListener("click", (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                const mode = btn.getAttribute("data-mode");
+                if (mode === "pause") {
+                    void handlePauseClick(footerEl);
+                } else if (mode === "play") {
+                    void handlePlayClick(footerEl);
+                }
+            });
+
+            slot.appendChild(btn);
+            slot.appendChild(tooltip);
+            rightContainer.appendChild(slot);
+        } else if (rightContainer.lastElementChild !== slot) {
+            rightContainer.appendChild(slot);
+        }
+        return slot;
+    }
+
+    function syncFooter(footerEl) {
+        if (!footerEl || !footerEl.isConnected) return;
+        const info = inspectFooterFiber(footerEl);
+        const slot = ensureSlot(footerEl);
+        if (!slot) return;
+
+        if (!info) {
+            slot.setAttribute("data-hidden", "true");
+            return;
+        }
+
+        // Migrate temporary pane key if cascadeId just resolved on a new conversation
+        const prevKey = footerEl.__agyLastCascadeKey;
+        if (prevKey && prevKey === "__default_pane__" && info.cascadeKey !== "__default_pane__" && pausedMap.has(prevKey)) {
+            pausedMap.set(info.cascadeKey, pausedMap.get(prevKey));
+            pausedMap.delete(prevKey);
+        }
+        footerEl.__agyLastCascadeKey = info.cascadeKey;
+
+        let entry = pausedMap.get(info.cascadeKey);
+
+        // If user manually started a new turn while paused, clear the paused state
+        if (entry && entry.status === "paused" && info.isRunning) {
+            pausedMap.delete(info.cascadeKey);
+            entry = undefined;
+        }
+
+        // Keep heldQueue synced if user edited/deleted queued messages while paused
+        if (entry && entry.status === "paused" && Array.isArray(info.queuedUserInputs) && info.queuedUserInputs.length > 0) {
+            entry.heldQueue = cloneQueuedInputs(info.queuedUserInputs);
+        }
+
+        const btn = slot.querySelector(".agy-pause-play-btn");
+        const badge = slot.querySelector(".agy-pause-play-badge");
+        const tooltip = slot.querySelector(".agy-pause-play-tooltip");
+        if (!btn || !badge || !tooltip) return;
+
+        if (entry && (entry.status === "pausing" || entry.status === "paused" || entry.status === "resuming")) {
+            slot.setAttribute("data-hidden", "false");
+            if (btn.getAttribute("data-mode") !== "play") {
+                btn.setAttribute("data-mode", "play");
+                btn.setAttribute("data-testid", "input-play-button");
+                btn.setAttribute("aria-label", "Resume execution (Play)");
+                btn.innerHTML = PLAY_SVG;
+                btn.appendChild(badge);
+            }
+            const busy = entry.status === "pausing" || entry.status === "resuming";
+            btn.disabled = busy;
+
+            const qLen = Math.max(info.queuedUserInputs?.length || 0, entry.heldQueue?.length || 0);
+            if (qLen > 0) {
+                badge.textContent = String(qLen);
+                badge.setAttribute("data-empty", "false");
+            } else {
+                badge.textContent = "";
+                badge.setAttribute("data-empty", "true");
+            }
+
+            if (entry.status === "pausing") {
+                tooltip.textContent = "Pausing execution…";
+            } else if (entry.status === "resuming") {
+                tooltip.textContent = "Resuming execution…";
+            } else {
+                tooltip.textContent = qLen > 0
+                    ? `Play: Resume execution (${qLen} queued preserved)`
+                    : "Play: Resume execution from where it stopped";
+            }
+        } else if (info.isRunning) {
+            slot.setAttribute("data-hidden", "false");
+            if (btn.getAttribute("data-mode") !== "pause") {
+                btn.setAttribute("data-mode", "pause");
+                btn.setAttribute("data-testid", "input-pause-button");
+                btn.setAttribute("aria-label", "Pause execution");
+                btn.innerHTML = PAUSE_SVG;
+                btn.appendChild(badge);
+            }
+            btn.disabled = false;
+            badge.textContent = "";
+            badge.setAttribute("data-empty", "true");
+            tooltip.textContent = "Pause execution";
+        } else {
+            slot.setAttribute("data-hidden", "true");
+        }
+    }
+
+    function syncAllFooters() {
+        const footers = document.querySelectorAll(".agy-composer-footer");
+        for (let i = 0; i < footers.length; i++) {
+            syncFooter(footers[i]);
+        }
+    }
+
+    let rafPending = false;
+    function scheduleSync() {
+        if (rafPending) return;
+        rafPending = true;
+        requestAnimationFrame(() => {
+            rafPending = false;
+            syncAllFooters();
+        });
+    }
+
+    const observer = new MutationObserver(scheduleSync);
+    observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "disabled", "data-testid", "aria-label"],
+    });
+
+    setInterval(syncAllFooters, 250);
+    syncAllFooters();
+})();"""
 
 
 def log(msg: str):
@@ -864,39 +1467,90 @@ def generate_patched_utils_js(original_code: str) -> str:
     return patched
 
 
-def apply_patch(app_paths: AppPaths, force_kill: bool = False):
-    """Applies the window size persistence patch to the targeted installation."""
+def generate_pause_patched_utils_js(original_code: str) -> str:
+    """Injects the Pause/Play prompt execution button into dist/utils.js via webContents."""
+    if PAUSE_PATCH_MARKER in original_code:
+        return original_code
+
+    encoded_script = json.dumps(PAUSE_RENDERER_JS)
+    pause_prelude = f"\n{PAUSE_PATCH_MARKER}\nconst _ANTIGRAVITY_PAUSE_PLAY_SCRIPT = {encoded_script};\n"
+
+    pause_listeners = f"""    {PAUSE_PATCH_MARKER}
+    const _injectAntigravityPausePlay = () => {{
+        if (win.isDestroyed()) return;
+        win.webContents.executeJavaScript(_ANTIGRAVITY_PAUSE_PLAY_SCRIPT).catch(() => {{}});
+    }};
+    win.webContents.on("dom-ready", _injectAntigravityPausePlay);
+    win.webContents.on("did-finish-load", _injectAntigravityPausePlay);"""
+
+    target_load_url = "void win.loadURL(url);"
+    if target_load_url in original_code:
+        target_to_replace = target_load_url
+        replacement_to_use = f"{pause_listeners}\n\n    {target_load_url}"
+    else:
+        match_lu = re.search(r"void\s+win\.loadURL\s*\(\s*url\s*\)\s*;", original_code)
+        if match_lu:
+            target_to_replace = match_lu.group(0)
+            replacement_to_use = f"{pause_listeners}\n\n    {target_to_replace}"
+        else:
+            raise RuntimeError("Snippet 'void win.loadURL(url);' not found in dist/utils.js")
+
+    return pause_prelude + original_code.replace(target_to_replace, replacement_to_use, 1)
+
+
+def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool = False):
+    """Applies the window size persistence patch and/or Pause/Play button patch to the targeted installation."""
     if app_paths.is_unpacked:
         utils_path = os.path.join(app_paths.app_dir, "dist", "utils.js")
-        if not os.path.exists(utils_path) or is_native_window_persistence_supported(app_paths):
+        if not os.path.exists(utils_path):
             app_ver = extract_app_version_from_dir(app_paths.app_dir)
             log_success(f"Detected Antigravity IDE v{app_ver} ({app_paths.app_root}).")
             log_success(
                 "Antigravity IDE natively persists window geometry (width, height, coordinates, and maximized state)."
             )
-            log("No patch required. Enjoy official window persistence out of the box!")
+            if add_pause:
+                log_warn("Note: --add-pause requires dist/utils.js (Electron shell), which was not found in this layout.")
+            else:
+                log("No patch required. Enjoy official window persistence out of the box!")
             remove_patch_info(app_paths)
             return
 
         with open(utils_path, "r", encoding="utf-8") as f:
             code = f.read()
 
-        if PATCH_MARKER in code:
+        is_native = is_native_window_persistence_supported(app_paths, code)
+        has_window_patch = PATCH_MARKER in code
+        has_pause_patch = PAUSE_PATCH_MARKER in code
+
+        need_window_patch = (not is_native) and (not has_window_patch)
+        need_pause_patch = add_pause and (not has_pause_patch)
+
+        if not need_window_patch and not need_pause_patch:
+            app_ver = extract_app_version_from_dir(app_paths.app_dir)
+            if add_pause and has_pause_patch:
+                log_warn("Pause/Play button patch (--add-pause) is already applied to this installation!")
+                return
+            if is_native:
+                log_success(f"Detected Antigravity v{app_ver} ({app_paths.app_root}).")
+                log_success(
+                    "Antigravity natively persists window geometry (width, height, coordinates, and maximized state)."
+                )
+                if has_pause_patch:
+                    log_success("Pause/Play prompt button (--add-pause) is also ACTIVE.")
+                else:
+                    log("No window patch required. (Tip: use --add-pause to add the Pause/Play prompt button!)")
+                    remove_patch_info(app_paths)
+                return
             log_warn("Window persistence patch is already applied to this installation!")
             return
 
-        if is_native_window_persistence_supported(app_paths, code):
-            app_ver = extract_app_version_from_dir(app_paths.app_dir)
-            log_success(f"Detected Antigravity v{app_ver} ({app_paths.app_root}).")
-            log_success(
-                "Antigravity natively persists window geometry (width, height, coordinates, and maximized state)."
-            )
-            log("No patch required. Enjoy official window persistence out of the box!")
-            remove_patch_info(app_paths)
-            return
-
-        log("Injecting geometry persistence logic into dist/utils.js...")
-        patched_code = generate_patched_utils_js(code)
+        patched_code = code
+        if need_window_patch:
+            log("Injecting geometry persistence logic into dist/utils.js...")
+            patched_code = generate_patched_utils_js(patched_code)
+        if need_pause_patch:
+            log("Injecting Pause/Play prompt execution button logic (--add-pause) into dist/utils.js...")
+            patched_code = generate_pause_patched_utils_js(patched_code)
 
         if is_app_running(app_paths):
             if force_kill:
@@ -918,7 +1572,7 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
                     log_error("Antigravity is running. Close it or use --kill to automatically terminate it.")
                     sys.exit(1)
         backup_file = os.path.join(app_paths.app_dir, "dist", "utils.js.orig")
-        if not os.path.exists(backup_file):
+        if not os.path.exists(backup_file) and not has_window_patch and not has_pause_patch:
             shutil.copy2(utils_path, backup_file)
         with open(utils_path, "w", encoding="utf-8") as f:
             f.write(patched_code)
@@ -947,21 +1601,51 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
     original_utils_bytes = payload[old_offset : old_offset + old_size]
     original_utils_code = original_utils_bytes.decode("utf-8")
 
-    if PATCH_MARKER in original_utils_code:
+    is_native = is_native_window_persistence_supported(header, original_utils_code)
+    has_window_patch = PATCH_MARKER in original_utils_code
+    has_pause_patch = PAUSE_PATCH_MARKER in original_utils_code
+
+    need_window_patch = (not is_native) and (not has_window_patch)
+    need_pause_patch = add_pause and (not has_pause_patch)
+
+    if not need_window_patch and not need_pause_patch:
+        if add_pause and has_pause_patch:
+            log_warn("Pause/Play button patch (--add-pause) is already applied to this installation!")
+            if is_native:
+                log_success(f"Native window state persistence is also active (v{app_version}).")
+            elif has_window_patch:
+                log_success("Window persistence patch is also active.")
+            return
+
+        if is_native:
+            log_success(f"Detected Antigravity v{app_version} with official native window state persistence!")
+            log_success(
+                "Antigravity natively persists window geometry (width, height, coordinates, and maximized state) in this version."
+            )
+            if has_pause_patch:
+                log_success("Pause/Play prompt button patch (--add-pause) is currently ACTIVE.")
+            else:
+                log("No window persistence ASAR patch required. Enjoy official window persistence out of the box!")
+                log("Tip: Run with --add-pause if you want to inject the Pause/Play prompt execution button.")
+                remove_patch_info(app_paths)
+            return
+
         log_warn("Window persistence patch is already applied to this installation!")
+        if not has_pause_patch:
+            log("Tip: Run with --add-pause if you also want to inject the Pause/Play prompt execution button.")
         return
 
-    if is_native_window_persistence_supported(header, original_utils_code):
-        log_success(f"Detected Antigravity v{app_version} with official native window state persistence!")
-        log_success(
-            "Antigravity natively persists window geometry (width, height, coordinates, and maximized state) in this version."
-        )
-        log("No ASAR patch required. Enjoy official window persistence out of the box!")
-        remove_patch_info(app_paths)
-        return
+    patched_utils_code = original_utils_code
+    if need_window_patch:
+        log("Injecting geometry persistence logic (size, position, maximized state)...")
+        patched_utils_code = generate_patched_utils_js(patched_utils_code)
+    elif is_native:
+        log_success(f"Antigravity v{app_version} natively persists window geometry; keeping native window state manager intact.")
 
-    log("Injecting geometry persistence logic (size, position, maximized state)...")
-    patched_utils_code = generate_patched_utils_js(original_utils_code)
+    if need_pause_patch:
+        log("Injecting Pause/Play prompt execution button logic (--add-pause)...")
+        patched_utils_code = generate_pause_patched_utils_js(patched_utils_code)
+
     patched_utils_bytes = patched_utils_code.encode("utf-8")
 
     delta = len(patched_utils_bytes) - old_size
@@ -1019,21 +1703,30 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
 
     try:
         with open(asar_path, "rb") as f:
-            current_clean_hash = hashlib.sha256(f.read()).hexdigest()
+            current_asar_hash = hashlib.sha256(f.read()).hexdigest()
 
-        # Check if backup_orig already exists from an older version
-        if os.path.exists(backup_orig):
-            with open(backup_orig, "rb") as f:
-                old_backup_hash = hashlib.sha256(f.read()).hexdigest()
-            if old_backup_hash != current_clean_hash:
-                log_warn("Detected a newly updated stock Antigravity installation!")
-                prev_backup = f"{backup_orig}.prev-{time.strftime('%Y%m%d-%H%M%S')}"
-                log(f"Archiving previous backup to: {prev_backup}")
-                shutil.copy2(backup_orig, prev_backup)
-                log(f"Updating master factory backup to current stock version: {backup_orig}")
+        already_patched = has_window_patch or has_pause_patch
+        existing_info = load_patch_info(app_paths) or {}
+        original_clean_hash = existing_info.get("original_asar_sha256") or current_asar_hash
+
+        # Check if backup_orig already exists from an older version (only update if current ASAR is clean stock)
+        if not already_patched:
+            original_clean_hash = current_asar_hash
+            if os.path.exists(backup_orig):
+                with open(backup_orig, "rb") as f:
+                    old_backup_hash = hashlib.sha256(f.read()).hexdigest()
+                if old_backup_hash != current_asar_hash:
+                    log_warn("Detected a newly updated stock Antigravity installation!")
+                    prev_backup = f"{backup_orig}.prev-{time.strftime('%Y%m%d-%H%M%S')}"
+                    log(f"Archiving previous backup to: {prev_backup}")
+                    shutil.copy2(backup_orig, prev_backup)
+                    log(f"Updating master factory backup to current stock version: {backup_orig}")
+                    shutil.copy2(asar_path, backup_orig)
+            else:
+                log(f"Creating permanent original backup at: {backup_orig}")
                 shutil.copy2(asar_path, backup_orig)
-        else:
-            log(f"Creating permanent original backup at: {backup_orig}")
+        elif not os.path.exists(backup_orig):
+            log(f"Creating backup at: {backup_orig}")
             shutil.copy2(asar_path, backup_orig)
 
         log(f"Creating timestamped backup at: {backup_timestamp}")
@@ -1061,8 +1754,11 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
             {
                 "patcher_version": __version__,
                 "patch_marker": PATCH_MARKER,
+                "pause_patch_marker": PAUSE_PATCH_MARKER if PAUSE_PATCH_MARKER in patched_utils_code else None,
+                "window_patch_applied": bool(PATCH_MARKER in patched_utils_code),
+                "pause_patch_applied": bool(PAUSE_PATCH_MARKER in patched_utils_code),
                 "app_version": app_version,
-                "original_asar_sha256": current_clean_hash,
+                "original_asar_sha256": original_clean_hash,
                 "patched_asar_sha256": new_asar_sha256,
                 "patched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             },
@@ -1115,8 +1811,11 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False):
 
     print("\n" + "=" * 62)
     log_success("PATCH APPLIED SUCCESSFULLY!")
-    print("  • Antigravity will now persist window size, position, and maximized state.")
-    print("  • When reopened, the window will restore exact previous dimensions.")
+    if PATCH_MARKER in patched_utils_code or is_native:
+        print("  • Antigravity will persist window size, position, and maximized state.")
+    if PAUSE_PATCH_MARKER in patched_utils_code:
+        print("  • Pause/Play button (--add-pause) enabled next to Queue message / Cancel.")
+        print("  • Pausing freezes current prompt execution and preserves queued messages.")
     print(f"  • Original backup preserved at: {backup_orig}")
     print("=" * 62 + "\n")
 
@@ -1332,8 +2031,27 @@ def download_file_with_progress(url: str, dest_path: str, expected_sha256: str =
         return False
 
 
-def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
+def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_pause: bool = False):
     """Applies a pending official update and automatically reapplies the window persistence patch."""
+    prev_info = load_patch_info(app_paths) or {}
+    effective_add_pause = bool(add_pause or prev_info.get("pause_patch_applied"))
+    if not effective_add_pause:
+        try:
+            if app_paths.is_unpacked and app_paths.app_dir:
+                upath = os.path.join(app_paths.app_dir, "dist", "utils.js")
+                if os.path.exists(upath):
+                    with open(upath, "r", encoding="utf-8", errors="ignore") as f:
+                        if PAUSE_PATCH_MARKER in f.read():
+                            effective_add_pause = True
+            elif app_paths.asar_path and os.path.exists(app_paths.asar_path):
+                h, p = parse_asar(app_paths.asar_path)
+                ue = h["files"]["dist"]["files"]["utils.js"]
+                uc = p[int(ue["offset"]) : int(ue["offset"]) + ue["size"]].decode("utf-8", "ignore")
+                if PAUSE_PATCH_MARKER in uc:
+                    effective_add_pause = True
+        except Exception:
+            pass
+
     update_file, update_version = find_pending_update()
 
     if not update_file:
@@ -1407,7 +2125,7 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
             )
             log("Applying window persistence patch to current installation...")
             new_app_paths = find_antigravity_app(app_paths.app_root)
-            apply_patch(new_app_paths, force_kill=force_kill)
+            apply_patch(new_app_paths, force_kill=force_kill, add_pause=effective_add_pause)
             log("Cleaning up stale updater cache...")
             try:
                 if os.path.isfile(update_file):
@@ -1672,7 +2390,7 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False):
     # Re-apply persistence patch to the fresh install
     log("Applying window persistence patch to new installation...")
     new_app_paths = find_antigravity_app(app_paths.app_root)
-    apply_patch(new_app_paths, force_kill=False)
+    apply_patch(new_app_paths, force_kill=False, add_pause=effective_add_pause)
     if sys.platform.startswith("linux"):
         ensure_linux_desktop_entry(new_app_paths)
 
@@ -1963,12 +2681,16 @@ def check_status(app_paths: AppPaths):
             with open(utils_path, "r", encoding="utf-8", errors="ignore") as f:
                 code = f.read()
             if PATCH_MARKER in code:
-                log_success("Status: PATCH IS ACTIVE and functioning (unpacked).")
+                log_success("Status: Window persistence PATCH IS ACTIVE and functioning (unpacked).")
             elif is_native_window_persistence_supported(app_paths, code):
                 log_success("Status: Native window state persistence is officially built-in (v2.29.0+).")
                 log("Antigravity natively persists window dimensions, screen coordinates, and maximized state.")
             else:
-                log_warn("Status: PATCH NOT APPLIED (window uses default 1400x900 size).")
+                log_warn("Status: Window persistence PATCH NOT APPLIED (window uses default 1400x900 size).")
+            if PAUSE_PATCH_MARKER in code:
+                log_success("Pause/Play Button (--add-pause): ACTIVE and functioning.")
+            else:
+                log("Pause/Play Button (--add-pause): Not applied (use --add-pause to enable).")
         else:
             log_success("Status: Antigravity IDE natively persists window geometry via its built-in state manager.")
             cfg_dir = os.path.expanduser("~/.config/Antigravity IDE")
@@ -2014,6 +2736,8 @@ def check_status(app_paths: AppPaths):
 
     patch_info = load_patch_info(app_paths)
     is_patched = False
+    is_pause_patched = False
+    code = ""
     try:
         utils_entry = header["files"]["dist"]["files"]["utils.js"]
         old_offset = int(utils_entry["offset"])
@@ -2021,24 +2745,33 @@ def check_status(app_paths: AppPaths):
         code = payload[old_offset : old_offset + old_size].decode("utf-8", "ignore")
         if PATCH_MARKER in code:
             is_patched = True
+        if PAUSE_PATCH_MARKER in code:
+            is_pause_patched = True
     except Exception as e:
         log_error(f"Error inspecting ASAR: {e}")
 
     if is_patched:
-        log_success("Status: PATCH IS ACTIVE and functioning.")
+        log_success("Status: Window persistence PATCH IS ACTIVE and functioning.")
         if patch_info and patch_info.get("patched_at"):
             log(f"Patched at: {patch_info['patched_at']}")
     elif is_native_window_persistence_supported(header, code):
         log_success("Status: Native window state persistence is officially built-in (v2.29.0+).")
         log("Antigravity natively persists window dimensions, screen coordinates, and maximized state.")
     else:
-        log_warn("Status: PATCH NOT APPLIED (window uses default 1400x900 size).")
+        log_warn("Status: Window persistence PATCH NOT APPLIED (window uses default 1400x900 size).")
         if patch_info and patch_info.get("app_version") and patch_info["app_version"] != app_version:
             log_warn(
                 f"Notice: App was previously patched on version {patch_info['app_version']}, "
                 f"but has since been officially updated to {app_version}."
             )
             log("Run without arguments to apply persistence to this new version.")
+
+    if is_pause_patched:
+        log_success("Pause/Play Button (--add-pause): ACTIVE and functioning.")
+        if not is_patched and patch_info and patch_info.get("patched_at"):
+            log(f"Patched at: {patch_info['patched_at']}")
+    else:
+        log("Pause/Play Button (--add-pause): Not applied (use --add-pause to enable).")
 
     backup_orig = app_paths.backup_orig
     if os.path.exists(backup_orig):
@@ -2102,12 +2835,13 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = 
             curr_utils_code = curr_payload[
                 int(utils_entry["offset"]) : int(utils_entry["offset"]) + utils_entry["size"]
             ].decode("utf-8", "ignore")
-            if is_native_window_persistence_supported(curr_header, curr_utils_code):
+            has_any_patch = (PATCH_MARKER in curr_utils_code) or (PAUSE_PATCH_MARKER in curr_utils_code)
+            if is_native_window_persistence_supported(curr_header, curr_utils_code) and not has_any_patch:
                 log_success(f"Antigravity v{app_version} already features official native window state persistence.")
                 log("The application is in stock factory state with native window persistence active. No restoration needed.")
                 remove_patch_info(app_paths)
                 return
-            elif PATCH_MARKER not in curr_utils_code:
+            elif not has_any_patch:
                 log_warn(f"Antigravity v{app_version} is already running in stock factory state without patches.")
                 return
         except Exception:
@@ -2142,9 +2876,9 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = 
         curr_utils_code = curr_payload[
             int(utils_entry["offset"]) : int(utils_entry["offset"]) + utils_entry["size"]
         ].decode("utf-8", "ignore")
-        if PATCH_MARKER in curr_utils_code:
+        if PATCH_MARKER in curr_utils_code or PAUSE_PATCH_MARKER in curr_utils_code:
             current_is_patched = True
-        elif is_native_window_persistence_supported(curr_header, curr_utils_code):
+        if is_native_window_persistence_supported(curr_header, curr_utils_code):
             is_native_persisted = True
     except Exception:
         pass
@@ -2302,6 +3036,11 @@ def main():
         action="store_true",
         help="Create or refresh Linux desktop shortcut (.desktop) and application menu entry.",
     )
+    parser.add_argument(
+        "--add-pause",
+        action="store_true",
+        help="Inject a Pause/Play button next to Queue message / Cancel to pause and resume running prompts while preserving queued messages.",
+    )
 
     args = parser.parse_args()
 
@@ -2331,9 +3070,9 @@ def main():
     elif args.restore:
         restore_backup(app_paths, force_kill=args.kill, force=args.force)
     elif args.update:
-        apply_pending_update(app_paths, force_kill=args.kill)
+        apply_pending_update(app_paths, force_kill=args.kill, add_pause=args.add_pause)
     else:
-        apply_patch(app_paths, force_kill=args.kill)
+        apply_patch(app_paths, force_kill=args.kill, add_pause=args.add_pause)
 
 
 if __name__ == "__main__":

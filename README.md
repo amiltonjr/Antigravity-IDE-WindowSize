@@ -57,11 +57,12 @@ flowchart LR
 - 🚀 **Self-Updating**: Keep this patcher up to date with a single `--selfupdate` command from GitHub.
 - 🛡️ **Intelligent Downgrade Guard**: Tracks version and ASAR hashes to prevent `--restore` from downgrading your app after an official update.
 - 🐧 **Linux Desktop Integration**: Automatically generates `.desktop` shortcuts with official icon for system application menu.
+- ⏸️ **Pause / Play Prompt Execution (`--add-pause`)**: Injects a contextual **Pause / Play** button right next to `Queue message` / `Cancel` inside the composer footer. Allows pausing an active agentic prompt, holding any queued messages (`Queued Messages` / `WHEN_IDLE`) untouched while paused, and seamlessly resuming from the exact checkpoint on **Play**.
 - 🔏 **Platform Compliant**: Full cross-platform support for macOS (`codesign`), Windows paths/NSIS, and Linux.
 
 > [!NOTE]
 > **Antigravity v2.29.0+ Native Support:**
-> Starting with version 2.29.0, Google officially integrated native window geometry persistence (`dist/windowState.js`). This tool automatically detects this feature and operates seamlessly across all versions: it preserves the stock architecture on v2.29.0+ while continuing to inject persistence on legacy versions (v2.26 - v2.28).
+> Starting with version 2.29.0, Google officially integrated native window geometry persistence (`dist/windowState.js`). This tool automatically detects this feature and operates seamlessly across all versions: it preserves the stock window manager on v2.29.0+ while continuing to inject persistence on legacy versions (v2.26 - v2.28), and allows injecting the `--add-pause` button on any version (including v2.29.0+).
 
 ---
 
@@ -76,8 +77,11 @@ python3 patch_antigravity_window.py --status
 # Apply the patch (prompts if Antigravity is running)
 python3 patch_antigravity_window.py
 
+# Apply with the Pause/Play prompt execution button enabled:
+python3 patch_antigravity_window.py --add-pause
+
 # Or apply and close Antigravity automatically:
-python3 patch_antigravity_window.py --kill
+python3 patch_antigravity_window.py --add-pause --kill
 ```
 
 > [!TIP]
@@ -92,6 +96,7 @@ python3 patch_antigravity_window.py --kill
 | Option | Argument | Description |
 |---|---|---|
 | *(none)* | — | Applies the persistence patch to the detected installation. |
+| `--add-pause` | — | Injects a contextual `Pause` / `Play` button next to `Queue message` / `Cancel` to pause and resume running prompts while preserving queued messages. |
 | `-v`, `--version` | — | Shows program version number and exits. |
 | `--status` | — | Checks if the patch is active on `app.asar` and detects pending updates. |
 | `--update` | — | Installs pending official updates downloaded by Antigravity and automatically re-patches. |
