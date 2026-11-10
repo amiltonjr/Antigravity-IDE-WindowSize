@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.4"
+__version__ = "1.3.5"
 
 import argparse
 import ast
@@ -274,6 +274,7 @@ PAUSE_RENDERER_JS = r"""(() => {
 
     const PAUSE_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1.5"></rect><rect x="14" y="4" width="4" height="16" rx="1.5"></rect></svg>';
     const PLAY_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.8C7 3.98 7.9 3.48 8.6 3.92L19.4 10.72C20.05 11.13 20.05 12.07 19.4 12.48L8.6 19.28C7.9 19.72 7 19.22 7 18.4V4.8Z"></path></svg>';
+    const SEND_NOW_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>';
     const EDIT_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>';
     const DELETE_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>';
 
@@ -284,15 +285,18 @@ PAUSE_RENDERER_JS = r"""(() => {
     const PAUSED_TEXT_REPLACEMENT = "The process has been paused.";
     const STORAGE_KEY = "agy_paused_sessions_v2";
 
-    // Map<cascadeId, { status: "pausing" | "paused" | "resuming", heldQueue: Array, capturedContext: Object | null, pausedAt: number, sawIdleAfterPause: boolean }>
+    // Map<cascadeId, { status: "pausing" | "paused" | "resuming" | "cancelled", heldQueue: Array, capturedContext: Object | null, pausedAt: number, sawIdleAfterPause: boolean }>
     const pausedMap = new Map();
 
     function savePausedStateToStorage() {
         try {
             const obj = {};
             for (const [k, v] of pausedMap.entries()) {
-                if (v && (v.status === "paused" || v.status === "pausing")) {
+                if (!v) continue;
+                const hasHeld = Array.isArray(v.heldQueue) && v.heldQueue.length > 0;
+                if (v.status === "paused" || v.status === "pausing" || (v.status === "cancelled" && hasHeld)) {
                     obj[k] = {
+                        status: v.status === "cancelled" ? "cancelled" : "paused",
                         heldQueue: v.heldQueue || [],
                         capturedContext: v.capturedContext || null,
                         pausedAt: v.pausedAt || Date.now(),
@@ -312,9 +316,12 @@ PAUSE_RENDERER_JS = r"""(() => {
             if (!obj || typeof obj !== "object") return;
             for (const [k, v] of Object.entries(obj)) {
                 if (v && typeof v === "object") {
+                    const status = v.status === "cancelled" ? "cancelled" : "paused";
+                    const heldQueue = Array.isArray(v.heldQueue) ? v.heldQueue : [];
+                    if (status === "cancelled" && heldQueue.length === 0) continue;
                     pausedMap.set(k, {
-                        status: "paused",
-                        heldQueue: Array.isArray(v.heldQueue) ? v.heldQueue : [],
+                        status,
+                        heldQueue,
                         capturedContext: v.capturedContext || null,
                         pausedAt: v.pausedAt || (Date.now() - 1000),
                         sawIdleAfterPause: true,
@@ -488,7 +495,12 @@ PAUSE_RENDERER_JS = r"""(() => {
         // Native Cancel button clicked while running
         const nativeCancelBtn = ev.target?.closest?.('[data-testid="input-cancel-button"], [data-testid="cancel-invocation-button"]');
         if (nativeCancelBtn && info?.cascadeKey) {
-            pausedMap.delete(info.cascadeKey);
+            const existing = pausedMap.get(info.cascadeKey);
+            if (existing && Array.isArray(existing.heldQueue) && existing.heldQueue.length > 0) {
+                existing.status = "cancelled";
+            } else {
+                pausedMap.delete(info.cascadeKey);
+            }
             savePausedStateToStorage();
             scheduleSync();
         }
@@ -730,7 +742,9 @@ PAUSE_RENDERER_JS = r"""(() => {
 
         wrapSubmitContext(info);
         const key = info.cascadeKey;
-        const snapshotQueue = cloneQueuedInputs(info.queuedUserInputs);
+        const prevEntry = pausedMap.get(key);
+        const priorHeld = (prevEntry && Array.isArray(prevEntry.heldQueue)) ? prevEntry.heldQueue : [];
+        const snapshotQueue = [...priorHeld, ...cloneQueuedInputs(info.queuedUserInputs)];
         const capturedContext = capturePartialContext(info);
 
         pausedMap.set(key, {
@@ -746,7 +760,7 @@ PAUSE_RENDERER_JS = r"""(() => {
         // Remove live queued items from language_server before cancelling so they do not auto-fire when turn becomes IDLE
         if (snapshotQueue.length > 0 && info.lsClient && typeof info.lsClient.deleteAgentMessage === "function" && info.rawCascadeId) {
             for (const qItem of snapshotQueue) {
-                if (qItem.msgId) {
+                if (qItem.msgId && !String(qItem.msgId).startsWith("held-")) {
                     try {
                         await info.lsClient.deleteAgentMessage({
                             messageId: qItem.msgId,
@@ -787,24 +801,25 @@ PAUSE_RENDERER_JS = r"""(() => {
     async function handleCancelPausedClick(footerEl) {
         const info = inspectFooterFiber(footerEl);
         const key = info?.cascadeKey || footerEl?.__agyLastCascadeKey;
-        if (key) {
-            pausedMap.delete(key);
-        }
-        pausedMap.delete("__default_pane__");
-        savePausedStateToStorage();
 
-        if (info && Array.isArray(info.queuedUserInputs) && info.queuedUserInputs.length > 0 && info.lsClient && typeof info.lsClient.deleteAgentMessage === "function" && info.rawCascadeId) {
-            for (const qItem of info.queuedUserInputs) {
-                if (qItem.msgId) {
-                    try {
-                        await info.lsClient.deleteAgentMessage({
-                            messageId: qItem.msgId,
-                            recipient: info.rawCascadeId,
-                        });
-                    } catch {}
-                }
+        // Cancel ONLY the paused execution while preserving any queued messages in heldQueue
+        if (key && pausedMap.has(key)) {
+            const entry = pausedMap.get(key);
+            if (entry && Array.isArray(entry.heldQueue) && entry.heldQueue.length > 0) {
+                entry.status = "cancelled";
+            } else {
+                pausedMap.delete(key);
             }
         }
+        if (pausedMap.has("__default_pane__")) {
+            const defEntry = pausedMap.get("__default_pane__");
+            if (defEntry && Array.isArray(defEntry.heldQueue) && defEntry.heldQueue.length > 0) {
+                defEntry.status = "cancelled";
+            } else {
+                pausedMap.delete("__default_pane__");
+            }
+        }
+        savePausedStateToStorage();
 
         syncSessionDOM();
         syncFooter(footerEl);
@@ -953,12 +968,16 @@ PAUSE_RENDERER_JS = r"""(() => {
         if (!floatingContainer) return;
 
         let card = floatingContainer.querySelector(":scope > .agy-held-queue-card");
-        const items = (entry && (entry.status === "paused" || entry.status === "pausing") && Array.isArray(entry.heldQueue))
+        const items = (entry && (entry.status === "paused" || entry.status === "pausing" || entry.status === "cancelled") && Array.isArray(entry.heldQueue))
             ? entry.heldQueue
             : [];
 
         if (items.length === 0) {
             if (card) card.remove();
+            if (entry && entry.status === "cancelled" && info?.cascadeKey) {
+                pausedMap.delete(info.cascadeKey);
+                savePausedStateToStorage();
+            }
             return;
         }
 
@@ -968,7 +987,7 @@ PAUSE_RENDERER_JS = r"""(() => {
             floatingContainer.insertBefore(card, floatingContainer.firstChild);
         }
 
-        const sig = items.map(it => `${it.msgId || ""}:${extractStepPreviewText(it.step)}`).join("|");
+        const sig = `${entry.status}:` + items.map(it => `${it.msgId || ""}:${extractStepPreviewText(it.step)}`).join("|");
         if (card.getAttribute("data-sig") === sig) return;
         card.setAttribute("data-sig", sig);
         card.innerHTML = "";
@@ -983,7 +1002,9 @@ PAUSE_RENDERER_JS = r"""(() => {
         countSpan.textContent = String(items.length);
         const subSpan = document.createElement("span");
         subSpan.className = "agy-held-queue-subtitle";
-        subSpan.textContent = "Sends after agent resumes working";
+        subSpan.textContent = entry.status === "cancelled"
+            ? "Sends after next prompt finishes (or click → to send now)"
+            : "Sends after agent finishes working";
 
         header.appendChild(titleSpan);
         header.appendChild(countSpan);
@@ -1004,6 +1025,57 @@ PAUSE_RENDERER_JS = r"""(() => {
             const actionsEl = document.createElement("div");
             actionsEl.className = "agy-held-queue-actions";
 
+            const sendNowBtn = document.createElement("button");
+            sendNowBtn.type = "button";
+            sendNowBtn.className = "agy-held-queue-action-btn";
+            sendNowBtn.title = "Send Now";
+            sendNowBtn.innerHTML = SEND_NOW_SVG;
+            sendNowBtn.addEventListener("click", (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                const latestInfo = inspectFooterFiber(footerEl) || info;
+                const target = entry.heldQueue.splice(idx, 1)[0];
+                const remaining = [...entry.heldQueue];
+                if (latestInfo?.cascadeKey) {
+                    pausedMap.delete(latestInfo.cascadeKey);
+                }
+                savePausedStateToStorage();
+                syncSessionDOM();
+                syncFooter(footerEl);
+                if (target && latestInfo) {
+                    void (async () => {
+                        try {
+                            const st = target.step || {};
+                            await dispatchItem(latestInfo, st.items || [], st.media || [], 1, {
+                                artifactComments: st.artifactComments || [],
+                                fileDiffComments: st.fileDiffComments || [],
+                                fileComments: st.fileComments || [],
+                            });
+                            if (remaining.length > 0) {
+                                const waitStart = Date.now();
+                                while (Date.now() - waitStart < 4500) {
+                                    const check = inspectFooterFiber(footerEl);
+                                    if (check && check.isRunning) break;
+                                    await new Promise(r => setTimeout(r, 60));
+                                }
+                                await new Promise(r => setTimeout(r, 120));
+                                const afterInfo = inspectFooterFiber(footerEl) || latestInfo;
+                                for (const rem of remaining) {
+                                    const rst = rem.step || {};
+                                    await dispatchItem(afterInfo, rst.items || [], rst.media || [], 2, {
+                                        artifactComments: rst.artifactComments || [],
+                                        fileDiffComments: rst.fileDiffComments || [],
+                                        fileComments: rst.fileComments || [],
+                                    });
+                                }
+                            }
+                        } catch (err) {
+                            console.error("[AntigravityPause] Error sending queued item now:", err);
+                        }
+                    })();
+                }
+            });
+
             const editBtn = document.createElement("button");
             editBtn.type = "button";
             editBtn.className = "agy-held-queue-action-btn";
@@ -1014,6 +1086,9 @@ PAUSE_RENDERER_JS = r"""(() => {
                 ev.stopPropagation();
                 const latestInfo = inspectFooterFiber(footerEl) || info;
                 const removed = entry.heldQueue.splice(idx, 1)[0];
+                if (entry.status === "cancelled" && entry.heldQueue.length === 0 && latestInfo?.cascadeKey) {
+                    pausedMap.delete(latestInfo.cascadeKey);
+                }
                 savePausedStateToStorage();
                 if (removed && latestInfo?.submitCtx?.inputControls?.restoreInput) {
                     try {
@@ -1033,10 +1108,14 @@ PAUSE_RENDERER_JS = r"""(() => {
                 ev.preventDefault();
                 ev.stopPropagation();
                 entry.heldQueue.splice(idx, 1);
+                if (entry.status === "cancelled" && entry.heldQueue.length === 0 && info?.cascadeKey) {
+                    pausedMap.delete(info.cascadeKey);
+                }
                 savePausedStateToStorage();
                 syncFooter(footerEl);
             });
 
+            actionsEl.appendChild(sendNowBtn);
             actionsEl.appendChild(editBtn);
             actionsEl.appendChild(delBtn);
             row.appendChild(textEl);
@@ -1168,6 +1247,39 @@ PAUSE_RENDERER_JS = r"""(() => {
             }
         }
 
+        // If user cancelled the paused prompt (keeping heldQueue) and then sent a new prompt directly,
+        // flush the preserved heldQueue into language_server (WHEN_IDLE) so they run right after the new prompt finishes.
+        if (entry && entry.status === "cancelled" && info.isRunning) {
+            const queueToFlush = Array.isArray(entry.heldQueue) ? [...entry.heldQueue] : [];
+            pausedMap.delete(info.cascadeKey);
+            savePausedStateToStorage();
+            entry = undefined;
+            if (queueToFlush.length > 0) {
+                void (async () => {
+                    await new Promise(r => setTimeout(r, 150));
+                    const latestInfo = inspectFooterFiber(footerEl) || info;
+                    for (const qItem of queueToFlush) {
+                        const st = qItem.step || {};
+                        try {
+                            await dispatchItem(
+                                latestInfo,
+                                st.items || [],
+                                st.media || [],
+                                2, // WHEN_IDLE (Queue)
+                                {
+                                    artifactComments: st.artifactComments || [],
+                                    fileDiffComments: st.fileDiffComments || [],
+                                    fileComments: st.fileComments || [],
+                                }
+                            );
+                        } catch (err) {
+                            console.error("[AntigravityPause] Error flushing preserved queue:", err);
+                        }
+                    }
+                })();
+            }
+        }
+
         syncHeldQueueCard(footerEl, info, entry);
 
         const cancelWrap = slot.querySelector(".agy-cancel-wrap");
@@ -1274,7 +1386,8 @@ PAUSE_RENDERER_JS = r"""(() => {
     function syncSessionDOM() {
         const footerEl = document.querySelector(".agy-composer-footer");
         const activeKey = footerEl?.__agyLastCascadeKey;
-        const isCurrentlyPaused = Boolean(activeKey && pausedMap.has(activeKey));
+        const activeEntry = activeKey ? pausedMap.get(activeKey) : undefined;
+        const isCurrentlyPaused = Boolean(activeEntry && (activeEntry.status === "paused" || activeEntry.status === "pausing"));
 
         // 1. Toggle notice text based on whether the active session is currently paused
         const cancelNotices = document.querySelectorAll("div.text-secondary-foreground, [aria-live]");
