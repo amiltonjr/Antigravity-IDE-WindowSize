@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.5"
+__version__ = "1.3.6"
 
 import argparse
 import ast
@@ -262,7 +262,8 @@ PAUSE_RENDERER_JS = r"""(() => {
             }
             div[role="article"][aria-label="User message"][data-agy-hidden-resume="true"],
             [data-testid="pending-user-messages"] > div[data-agy-hidden-resume="true"],
-            div[data-agy-hidden-turn-footer="true"] {
+            div[data-agy-hidden-turn-footer="true"],
+            div[data-agy-hidden-native-queue="true"] {
                 display: none !important;
                 min-height: 0 !important;
                 margin: 0 !important;
@@ -744,7 +745,15 @@ PAUSE_RENDERER_JS = r"""(() => {
         const key = info.cascadeKey;
         const prevEntry = pausedMap.get(key);
         const priorHeld = (prevEntry && Array.isArray(prevEntry.heldQueue)) ? prevEntry.heldQueue : [];
-        const snapshotQueue = [...priorHeld, ...cloneQueuedInputs(info.queuedUserInputs)];
+        const rawSnapshot = [...priorHeld, ...cloneQueuedInputs(info.queuedUserInputs)];
+        const seenIds = new Set();
+        const snapshotQueue = [];
+        for (const item of rawSnapshot) {
+            const dedupeKey = item?.msgId || extractStepPreviewText(item?.step);
+            if (dedupeKey && seenIds.has(dedupeKey)) continue;
+            if (dedupeKey) seenIds.add(dedupeKey);
+            snapshotQueue.push(item);
+        }
         const capturedContext = capturePartialContext(info);
 
         pausedMap.set(key, {
@@ -974,11 +983,24 @@ PAUSE_RENDERER_JS = r"""(() => {
 
         if (items.length === 0) {
             if (card) card.remove();
+            for (const child of Array.from(floatingContainer.children)) {
+                if (child.hasAttribute("data-agy-hidden-native-queue")) {
+                    child.removeAttribute("data-agy-hidden-native-queue");
+                }
+            }
             if (entry && entry.status === "cancelled" && info?.cascadeKey) {
                 pausedMap.delete(info.cascadeKey);
                 savePausedStateToStorage();
             }
             return;
+        }
+
+        // Prevent duplicate stacked queue cards while React unmounts its native Queued Messages block
+        for (const child of Array.from(floatingContainer.children)) {
+            if (child === card || child.classList.contains("agy-held-queue-card")) continue;
+            if ((child.textContent || "").includes("Queued Messages")) {
+                child.setAttribute("data-agy-hidden-native-queue", "true");
+            }
         }
 
         if (!card) {
