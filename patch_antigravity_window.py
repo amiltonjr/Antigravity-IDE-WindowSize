@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.3"
+__version__ = "1.3.4"
 
 import argparse
 import ast
@@ -183,8 +183,82 @@ PAUSE_RENDERER_JS = r"""(() => {
                 opacity: 1;
                 transform: translateY(0);
             }
-            button[data-testid="send-button"][data-agy-hidden-send="true"] {
-                display: none !important;
+            .agy-held-queue-card {
+                border-radius: 12px;
+                border: 1px solid var(--color-border, rgba(255, 255, 255, 0.1));
+                background-color: var(--color-card, rgba(30, 30, 30, 0.95));
+                padding: 6px 10px;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                font-size: 12px;
+                color: var(--color-foreground, #e5e5e5);
+            }
+            .agy-held-queue-header {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-weight: 500;
+                font-size: 11.5px;
+            }
+            .agy-held-queue-count {
+                font-size: 10px;
+                background-color: var(--color-secondary, rgba(128, 128, 128, 0.25));
+                color: var(--color-secondary-foreground, #d4d4d4);
+                border-radius: 9999px;
+                padding: 1px 6px;
+                line-height: 1.2;
+            }
+            .agy-held-queue-subtitle {
+                color: var(--color-muted-foreground, #888888);
+                font-weight: 400;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .agy-held-queue-list {
+                display: flex;
+                flex-direction: column;
+                gap: 2px;
+            }
+            .agy-held-queue-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                min-height: 26px;
+                padding: 2px 0;
+            }
+            .agy-held-queue-text {
+                flex: 1;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                color: var(--color-foreground, #e5e5e5);
+            }
+            .agy-held-queue-actions {
+                display: inline-flex;
+                align-items: center;
+                gap: 2px;
+                flex-shrink: 0;
+            }
+            .agy-held-queue-action-btn {
+                width: 22px;
+                height: 22px;
+                border-radius: 6px;
+                border: none;
+                background: transparent;
+                color: var(--color-muted-foreground, #999999);
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                padding: 0;
+            }
+            .agy-held-queue-action-btn:hover {
+                background-color: var(--color-secondary, rgba(128, 128, 128, 0.2));
+                color: var(--color-foreground, #ffffff);
             }
             div[role="article"][aria-label="User message"][data-agy-hidden-resume="true"],
             [data-testid="pending-user-messages"] > div[data-agy-hidden-resume="true"],
@@ -200,56 +274,57 @@ PAUSE_RENDERER_JS = r"""(() => {
 
     const PAUSE_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4" height="16" rx="1.5"></rect><rect x="14" y="4" width="4" height="16" rx="1.5"></rect></svg>';
     const PLAY_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.8C7 3.98 7.9 3.48 8.6 3.92L19.4 10.72C20.05 11.13 20.05 12.07 19.4 12.48L8.6 19.28C7.9 19.72 7 19.22 7 18.4V4.8Z"></path></svg>';
+    const EDIT_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>';
+    const DELETE_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>';
 
     const RESUME_PROMPT_EN = "Continue executing the previous prompt from the exact point where it was paused, without losing any context.";
     const RESUME_PROMPT_PT_LEGACY = "Continue a execução do prompt anterior exatamente de onde parou, sem perder nada do contexto.";
     const RESUME_TAG = "antigravity_pause_resume";
     const CANCELLED_TEXT_ORIG = "User cancelled agent execution.";
     const PAUSED_TEXT_REPLACEMENT = "The process has been paused.";
+    const STORAGE_KEY = "agy_paused_sessions_v2";
 
     // Map<cascadeId, { status: "pausing" | "paused" | "resuming", heldQueue: Array, capturedContext: Object | null, pausedAt: number, sawIdleAfterPause: boolean }>
     const pausedMap = new Map();
-    const explicitlyCancelledSet = new Set();
 
-    function disposeHeldQueueHandles(entry) {
-        if (!entry || !Array.isArray(entry.heldQueue)) return;
-        for (const item of entry.heldQueue) {
-            if (item && item.optHandle) {
-                try { item.optHandle.dispose(); } catch {}
-                item.optHandle = null;
-            }
-        }
-    }
-
-    function attachOptimisticHandle(info, qItem) {
-        if (!info || !qItem || qItem.optHandle) return;
-        const appendFn =
-            info.submitCtx?.__agyOrigAppendOptimistic ||
-            info.optimisticCtx?.appendOptimisticUserMessage ||
-            info.submitCtx?.appendOptimisticUserMessage;
-        if (typeof appendFn !== "function" || !info.rawCascadeId) return;
+    function savePausedStateToStorage() {
         try {
-            const st = qItem.step || {};
-            const realHandle = appendFn({
-                cascadeId: info.rawCascadeId,
-                items: st.items || [],
-                media: st.media || [],
-                deliveryStrategy: 2, // WHEN_IDLE
-                artifactComments: st.artifactComments || [],
-                fileDiffComments: st.fileDiffComments || [],
-                fileComments: st.fileComments || [],
-            }, { queued: true });
-            const holdDisp = realHandle?.hold?.();
-            qItem.optHandle = {
-                dispose: () => {
-                    try { holdDisp?.dispose?.(); } catch {}
-                    try { realHandle?.dispose?.(); } catch {}
+            const obj = {};
+            for (const [k, v] of pausedMap.entries()) {
+                if (v && (v.status === "paused" || v.status === "pausing")) {
+                    obj[k] = {
+                        heldQueue: v.heldQueue || [],
+                        capturedContext: v.capturedContext || null,
+                        pausedAt: v.pausedAt || Date.now(),
+                    };
                 }
-            };
-        } catch (err) {
-            console.error("[AntigravityPause] Failed to attach optimistic queue handle:", err);
-        }
+            }
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+        } catch {}
     }
+
+    function loadPausedStateFromStorage() {
+        try {
+            sessionStorage.removeItem("agy_paused_sessions_v1");
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return;
+            const obj = JSON.parse(raw);
+            if (!obj || typeof obj !== "object") return;
+            for (const [k, v] of Object.entries(obj)) {
+                if (v && typeof v === "object") {
+                    pausedMap.set(k, {
+                        status: "paused",
+                        heldQueue: Array.isArray(v.heldQueue) ? v.heldQueue : [],
+                        capturedContext: v.capturedContext || null,
+                        pausedAt: v.pausedAt || (Date.now() - 1000),
+                        sawIdleAfterPause: true,
+                    });
+                }
+            }
+        } catch {}
+    }
+
+    loadPausedStateFromStorage();
 
     function isInternalResumePayload(payload) {
         if (!payload || typeof payload !== "object") return false;
@@ -270,110 +345,125 @@ PAUSE_RENDERER_JS = r"""(() => {
         if (!info) return;
         const { submitCtx, lsClient } = info;
 
-        if (submitCtx && typeof submitCtx === "object" && !submitCtx.__agyPauseWrapped) {
-            const origAppend = submitCtx.appendOptimisticUserMessage;
-            const origSend = submitCtx.sendMessage;
-            const origCancelQuestion = submitCtx.cancelActiveQuestionBeforeSend;
-            submitCtx.__agyOrigAppendOptimistic = origAppend;
-            submitCtx.__agyOrigSendMessage = origSend;
-            submitCtx.__agyPauseWrapped = true;
-
-            if (typeof origCancelQuestion === "function") {
-                submitCtx.cancelActiveQuestionBeforeSend = function (...args) {
-                    const entry = pausedMap.get(info.cascadeKey) || pausedMap.get("__default_pane__");
-                    if (entry && (entry.status === "paused" || entry.status === "pausing")) {
-                        return Promise.resolve();
-                    }
-                    return origCancelQuestion.apply(this, args);
-                };
+        if (submitCtx && typeof submitCtx === "object") {
+            if (info.cascadeKey) {
+                submitCtx.__agyCurrentCascadeKey = info.cascadeKey;
             }
+            if (!submitCtx.__agyPauseWrapped) {
+                const origAppend = submitCtx.appendOptimisticUserMessage;
+                const origSend = submitCtx.sendMessage;
+                const origCancelQuestion = submitCtx.cancelActiveQuestionBeforeSend;
+                const origBeginInteraction = submitCtx.beginPromptInteraction;
+                submitCtx.__agyOrigAppendOptimistic = origAppend;
+                submitCtx.__agyOrigSendMessage = origSend;
+                submitCtx.__agyPauseWrapped = true;
 
-            if (typeof origAppend === "function") {
-                submitCtx.appendOptimisticUserMessage = function (params, options) {
-                    const cKey = params?.cascadeId || info.cascadeKey;
-                    const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
-                    if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(params)) {
-                        const realHandle = origAppend.call(this, {
-                            ...params,
-                            deliveryStrategy: 2, // WHEN_IDLE (Queue)
-                        }, { queued: true });
-                        const holdDisp = realHandle?.hold?.();
-                        const optHandle = {
-                            dispose: () => {
-                                try { holdDisp?.dispose?.(); } catch {}
-                                try { realHandle?.dispose?.(); } catch {}
-                            }
-                        };
-                        entry.heldQueue.push({
-                            msgId: params?.clientMessageId || `held-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-                            deliveryStrategy: 2,
-                            metadata: undefined,
-                            step: {
-                                items: Array.isArray(params?.items) ? [...params.items] : [],
-                                media: Array.isArray(params?.media) ? [...params.media] : [],
-                                artifactComments: Array.isArray(params?.artifactComments) ? [...params.artifactComments] : [],
-                                fileDiffComments: Array.isArray(params?.fileDiffComments) ? [...params.fileDiffComments] : [],
-                                fileComments: Array.isArray(params?.fileComments) ? [...params.fileComments] : [],
-                            },
-                            optHandle,
-                            queuedViaOptimistic: true,
-                        });
-                        scheduleSync();
-                        return {
-                            dispose: () => {},
-                            markAsFailed: () => {},
-                            hold: () => ({ dispose: () => {} }),
-                        };
-                    }
-                    return origAppend.call(this, params, options);
-                };
-            }
+                if (typeof origCancelQuestion === "function") {
+                    submitCtx.cancelActiveQuestionBeforeSend = function (...args) {
+                        const cKey = submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                        if (entry && (entry.status === "paused" || entry.status === "pausing")) {
+                            return Promise.resolve();
+                        }
+                        return origCancelQuestion.apply(this, args);
+                    };
+                }
 
-            if (typeof origSend === "function") {
-                submitCtx.sendMessage = function (req, ...rest) {
-                    const cKey = req?.cascadeId || info.cascadeKey;
-                    const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
-                    if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(req)) {
-                        const alreadyQueued = entry.heldQueue.some(q => q.queuedViaOptimistic && q.msgId === req?.clientMessageId);
-                        if (!alreadyQueued && Array.isArray(req?.items) && (req.items.length > 0 || (req.media && req.media.length > 0))) {
-                            const newItem = {
-                                msgId: req?.clientMessageId || `held-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                if (typeof origBeginInteraction === "function") {
+                    submitCtx.beginPromptInteraction = function (params, ...rest) {
+                        const cKey = params?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                        if (entry && (entry.status === "paused" || entry.status === "pausing")) {
+                            return {
+                                cancelled: () => {},
+                                dispatched: () => {},
+                                errored: () => {},
+                            };
+                        }
+                        return origBeginInteraction.call(this, params, ...rest);
+                    };
+                }
+
+                if (typeof origAppend === "function") {
+                    submitCtx.appendOptimisticUserMessage = function (params, options) {
+                        const cKey = params?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                        if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(params)) {
+                            entry.heldQueue.push({
+                                msgId: params?.clientMessageId || `held-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                                 deliveryStrategy: 2,
                                 metadata: undefined,
                                 step: {
-                                    items: [...req.items],
-                                    media: Array.isArray(req.media) ? [...req.media] : [],
-                                    artifactComments: Array.isArray(req.artifactComments) ? [...req.artifactComments] : [],
-                                    fileDiffComments: Array.isArray(req.fileDiffComments) ? [...req.fileDiffComments] : [],
-                                    fileComments: Array.isArray(req.fileComments) ? [...req.fileComments] : [],
+                                    items: Array.isArray(params?.items) ? [...params.items] : [],
+                                    media: Array.isArray(params?.media) ? [...params.media] : [],
+                                    artifactComments: Array.isArray(params?.artifactComments) ? [...params.artifactComments] : [],
+                                    fileDiffComments: Array.isArray(params?.fileDiffComments) ? [...params.fileDiffComments] : [],
+                                    fileComments: Array.isArray(params?.fileComments) ? [...params.fileComments] : [],
                                 },
-                                optHandle: null,
+                                queuedViaHook: true,
+                            });
+                            savePausedStateToStorage();
+                            scheduleSync();
+                            return {
+                                dispose: () => {},
+                                markAsFailed: () => {},
+                                hold: () => ({ dispose: () => {} }),
                             };
-                            attachOptimisticHandle(info, newItem);
-                            entry.heldQueue.push(newItem);
                         }
-                        scheduleSync();
-                        return Promise.resolve({});
-                    }
-                    return origSend.call(this, req, ...rest);
-                };
+                        return origAppend.call(this, params, options);
+                    };
+                }
+
+                if (typeof origSend === "function") {
+                    submitCtx.sendMessage = function (req, ...rest) {
+                        const cKey = req?.cascadeId || submitCtx.__agyCurrentCascadeKey || "__default_pane__";
+                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                        if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(req)) {
+                            const alreadyQueued = entry.heldQueue.some(q => q.queuedViaHook && q.msgId === req?.clientMessageId);
+                            if (!alreadyQueued && Array.isArray(req?.items) && (req.items.length > 0 || (req.media && req.media.length > 0))) {
+                                entry.heldQueue.push({
+                                    msgId: req?.clientMessageId || `held-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                                    deliveryStrategy: 2,
+                                    metadata: undefined,
+                                    step: {
+                                        items: [...req.items],
+                                        media: Array.isArray(req.media) ? [...req.media] : [],
+                                        artifactComments: Array.isArray(req.artifactComments) ? [...req.artifactComments] : [],
+                                        fileDiffComments: Array.isArray(req.fileDiffComments) ? [...req.fileDiffComments] : [],
+                                        fileComments: Array.isArray(req.fileComments) ? [...req.fileComments] : [],
+                                    },
+                                    queuedViaHook: true,
+                                });
+                                savePausedStateToStorage();
+                            }
+                            scheduleSync();
+                            return Promise.resolve({});
+                        }
+                        return origSend.call(this, req, ...rest);
+                    };
+                }
             }
         }
 
-        if (lsClient && typeof lsClient === "object" && !lsClient.__agyPauseWrapped) {
-            const origLsSend = lsClient.sendUserCascadeMessage;
-            if (typeof origLsSend === "function") {
-                lsClient.__agyOrigSendUserCascadeMessage = origLsSend;
-                lsClient.__agyPauseWrapped = true;
-                lsClient.sendUserCascadeMessage = function (req, ...rest) {
-                    const cKey = req?.cascadeId || info.cascadeKey;
-                    const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
-                    if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(req)) {
-                        scheduleSync();
-                        return Promise.resolve({});
-                    }
-                    return origLsSend.call(this, req, ...rest);
-                };
+        if (lsClient && typeof lsClient === "object") {
+            if (info.cascadeKey) {
+                lsClient.__agyCurrentCascadeKey = info.cascadeKey;
+            }
+            if (!lsClient.__agyPauseWrapped) {
+                const origLsSend = lsClient.sendUserCascadeMessage;
+                if (typeof origLsSend === "function") {
+                    lsClient.__agyOrigSendUserCascadeMessage = origLsSend;
+                    lsClient.__agyPauseWrapped = true;
+                    lsClient.sendUserCascadeMessage = function (req, ...rest) {
+                        const cKey = req?.cascadeId || lsClient.__agyCurrentCascadeKey || "__default_pane__";
+                        const entry = pausedMap.get(cKey) || pausedMap.get("__default_pane__");
+                        if (entry && (entry.status === "paused" || entry.status === "pausing") && !isInternalResumePayload(req)) {
+                            scheduleSync();
+                            return Promise.resolve({});
+                        }
+                        return origLsSend.call(this, req, ...rest);
+                    };
+                }
             }
         }
     }
@@ -395,107 +485,35 @@ PAUSE_RENDERER_JS = r"""(() => {
             wrapSubmitContext(info);
         }
 
-        // 1. Native Cancel button clicked while running
+        // Native Cancel button clicked while running
         const nativeCancelBtn = ev.target?.closest?.('[data-testid="input-cancel-button"], [data-testid="cancel-invocation-button"]');
         if (nativeCancelBtn && info?.cascadeKey) {
-            const existing = pausedMap.get(info.cascadeKey);
-            if (existing) disposeHeldQueueHandles(existing);
-            explicitlyCancelledSet.add(info.cascadeKey);
             pausedMap.delete(info.cascadeKey);
+            savePausedStateToStorage();
             scheduleSync();
-            return;
-        }
-
-        // 2. Action buttons (Delete / Edit / Send Now) on QueuedMessagesCard while paused
-        const decoratorBtn = ev.target?.closest?.('[data-testid="queued-messages-card"] [data-testid="queued-decorators"] button');
-        if (decoratorBtn && info) {
-            const entry = pausedMap.get(info.cascadeKey);
-            if (entry && entry.status === "paused" && entry.heldQueue.length > 0) {
-                const card = decoratorBtn.closest('[data-testid="queued-messages-card"]');
-                const decoratorsEl = decoratorBtn.closest('[data-testid="queued-decorators"]');
-                const allRows = card ? Array.from(card.querySelectorAll('[data-testid="queued-decorators"]')) : [];
-                const rowIdx = allRows.indexOf(decoratorsEl);
-                if (rowIdx >= 0 && rowIdx < entry.heldQueue.length) {
-                    const aria = (decoratorBtn.getAttribute("aria-label") || "").toLowerCase();
-                    const targetItem = entry.heldQueue[rowIdx];
-                    if (aria.startsWith("delete")) {
-                        ev.preventDefault();
-                        ev.stopPropagation();
-                        targetItem.optHandle?.dispose?.();
-                        entry.heldQueue.splice(rowIdx, 1);
-                        if (footerEl) syncFooter(footerEl);
-                        return;
-                    }
-                    if (aria.startsWith("edit")) {
-                        ev.preventDefault();
-                        ev.stopPropagation();
-                        targetItem.optHandle?.dispose?.();
-                        entry.heldQueue.splice(rowIdx, 1);
-                        try {
-                            info.submitCtx?.inputControls?.restoreInput?.(targetItem.step?.items || [], targetItem.step?.media || []);
-                            if (info.rawCascadeId && targetItem.step) {
-                                info.submitCtx?.restoreReviewComments?.({ cascadeId: info.rawCascadeId, comments: targetItem.step });
-                            }
-                            info.lexicalRef?.current?.focus?.();
-                        } catch (err) {
-                            console.error("[AntigravityPause] Failed to restore queued message for editing:", err);
-                        }
-                        if (footerEl) syncFooter(footerEl);
-                        return;
-                    }
-                    if (aria.startsWith("send now")) {
-                        ev.preventDefault();
-                        ev.stopPropagation();
-                        targetItem.optHandle?.dispose?.();
-                        entry.heldQueue.splice(rowIdx, 1);
-                        const remaining = [...entry.heldQueue];
-                        disposeHeldQueueHandles(entry);
-                        pausedMap.delete(info.cascadeKey);
-                        explicitlyCancelledSet.add(info.cascadeKey);
-                        if (footerEl) syncFooter(footerEl);
-                        void (async () => {
-                            try {
-                                const st = targetItem.step || {};
-                                await dispatchItem(info, st.items || [], st.media || [], 1, {
-                                    artifactComments: st.artifactComments || [],
-                                    fileDiffComments: st.fileDiffComments || [],
-                                    fileComments: st.fileComments || [],
-                                });
-                                if (remaining.length > 0) {
-                                    const waitStart = Date.now();
-                                    while (Date.now() - waitStart < 4500) {
-                                        const latest = footerEl ? inspectFooterFiber(footerEl) : null;
-                                        if (latest && latest.isRunning) break;
-                                        await new Promise(r => setTimeout(r, 60));
-                                    }
-                                    await new Promise(r => setTimeout(r, 120));
-                                    const latestInfo = (footerEl ? inspectFooterFiber(footerEl) : null) || info;
-                                    for (const rem of remaining) {
-                                        const rst = rem.step || {};
-                                        await dispatchItem(latestInfo, rst.items || [], rst.media || [], 2, {
-                                            artifactComments: rst.artifactComments || [],
-                                            fileDiffComments: rst.fileDiffComments || [],
-                                            fileComments: rst.fileComments || [],
-                                        });
-                                    }
-                                }
-                            } catch (err) {
-                                console.error("[AntigravityPause] Failed to send queued message now:", err);
-                            }
-                        })();
-                        return;
-                    }
-                }
-            }
         }
     }, true);
 
     function getReactFiber(el) {
         if (!el || typeof el !== "object") return null;
+        let fiber = null;
         for (const k of Object.keys(el)) {
-            if (k.startsWith("__reactFiber$")) return el[k];
+            if (k.startsWith("__reactFiber$")) {
+                fiber = el[k];
+                break;
+            }
         }
-        return null;
+        if (!fiber) return null;
+        let root = fiber;
+        let guard = 0;
+        while (root.return && guard < 120) {
+            root = root.return;
+            guard++;
+        }
+        if (root.stateNode && root.stateNode.current === root) {
+            return fiber;
+        }
+        return fiber.alternate || fiber;
     }
 
     function cloneQueuedInputs(list) {
@@ -511,7 +529,6 @@ PAUSE_RENDERER_JS = r"""(() => {
                 fileDiffComments: Array.isArray(item.step.fileDiffComments) ? [...item.step.fileDiffComments] : [],
                 fileComments: Array.isArray(item.step.fileComments) ? [...item.step.fileComments] : [],
             } : { items: [], media: [], artifactComments: [], fileDiffComments: [], fileComments: [] },
-            optHandle: item?.optHandle || null,
         }));
     }
 
@@ -524,7 +541,6 @@ PAUSE_RENDERER_JS = r"""(() => {
         let inputBoxProps = null;
         let stepHandlerCtx = null;
         let lsClient = null;
-        let optimisticCtx = null;
         let submitCtx = null;
 
         const examineContextValue = (val) => {
@@ -534,9 +550,6 @@ PAUSE_RENDERER_JS = r"""(() => {
             }
             if (!lsClient && typeof val.deleteAgentMessage === "function" && typeof val.sendUserCascadeMessage === "function") {
                 lsClient = val;
-            }
-            if (!optimisticCtx && typeof val.appendOptimisticUserMessage === "function" && val.registry) {
-                optimisticCtx = val;
             }
         };
 
@@ -556,6 +569,7 @@ PAUSE_RENDERER_JS = r"""(() => {
                     typeof candidate.inputControls.clearInput === "function"
                 ) {
                     if (!submitCtx) submitCtx = candidate;
+                    wrapSubmitContext({ cascadeKey: inputBoxProps?.cascadeId || "__default_pane__", submitCtx: candidate, lsClient });
                 }
                 hook = hook.next;
                 hGuard++;
@@ -588,10 +602,9 @@ PAUSE_RENDERER_JS = r"""(() => {
                     examineContextValue(mp.value);
                 }
             }
-            if (!submitCtx) {
-                examineFiberHooks(curr);
-                if (curr.alternate) examineFiberHooks(curr.alternate);
-            }
+            examineFiberHooks(curr);
+            if (curr.alternate) examineFiberHooks(curr.alternate);
+
             let ctxDep = curr.dependencies?.firstContext;
             let cGuard = 0;
             while (ctxDep && cGuard < 25) {
@@ -640,7 +653,6 @@ PAUSE_RENDERER_JS = r"""(() => {
             lexicalRef: footerProps?.lexicalRef,
             stepHandlerCtx,
             lsClient,
-            optimisticCtx,
             submitCtx,
             queuedUserInputs,
         };
@@ -718,7 +730,6 @@ PAUSE_RENDERER_JS = r"""(() => {
 
         wrapSubmitContext(info);
         const key = info.cascadeKey;
-        explicitlyCancelledSet.delete(key);
         const snapshotQueue = cloneQueuedInputs(info.queuedUserInputs);
         const capturedContext = capturePartialContext(info);
 
@@ -729,12 +740,13 @@ PAUSE_RENDERER_JS = r"""(() => {
             pausedAt: Date.now(),
             sawIdleAfterPause: false,
         });
+        savePausedStateToStorage();
         syncFooter(footerEl);
 
         // Remove live queued items from language_server before cancelling so they do not auto-fire when turn becomes IDLE
         if (snapshotQueue.length > 0 && info.lsClient && typeof info.lsClient.deleteAgentMessage === "function" && info.rawCascadeId) {
             for (const qItem of snapshotQueue) {
-                if (qItem.msgId && !String(qItem.msgId).startsWith("opt-")) {
+                if (qItem.msgId) {
                     try {
                         await info.lsClient.deleteAgentMessage({
                             messageId: qItem.msgId,
@@ -766,26 +778,24 @@ PAUSE_RENDERER_JS = r"""(() => {
             currentEntry.status = "paused";
             currentEntry.sawIdleAfterPause = true;
             currentEntry.pausedAt = Date.now();
-            for (const qItem of currentEntry.heldQueue) {
-                attachOptimisticHandle(postInfo, qItem);
-            }
+            savePausedStateToStorage();
         }
+        syncSessionDOM();
         syncFooter(footerEl);
     }
 
     async function handleCancelPausedClick(footerEl) {
         const info = inspectFooterFiber(footerEl);
-        if (!info) return;
-
-        const key = info.cascadeKey;
-        const entry = pausedMap.get(key);
-        if (entry) {
-            disposeHeldQueueHandles(entry);
+        const key = info?.cascadeKey || footerEl?.__agyLastCascadeKey;
+        if (key) {
+            pausedMap.delete(key);
         }
+        pausedMap.delete("__default_pane__");
+        savePausedStateToStorage();
 
-        if (Array.isArray(info.queuedUserInputs) && info.queuedUserInputs.length > 0 && info.lsClient && typeof info.lsClient.deleteAgentMessage === "function" && info.rawCascadeId) {
+        if (info && Array.isArray(info.queuedUserInputs) && info.queuedUserInputs.length > 0 && info.lsClient && typeof info.lsClient.deleteAgentMessage === "function" && info.rawCascadeId) {
             for (const qItem of info.queuedUserInputs) {
-                if (qItem.msgId && !String(qItem.msgId).startsWith("opt-")) {
+                if (qItem.msgId) {
                     try {
                         await info.lsClient.deleteAgentMessage({
                             messageId: qItem.msgId,
@@ -796,8 +806,6 @@ PAUSE_RENDERER_JS = r"""(() => {
             }
         }
 
-        explicitlyCancelledSet.add(key);
-        pausedMap.delete(key);
         syncSessionDOM();
         syncFooter(footerEl);
     }
@@ -852,21 +860,21 @@ PAUSE_RENDERER_JS = r"""(() => {
 
         try {
             const queueToRestore = [...(entry.heldQueue || [])];
-            disposeHeldQueueHandles(entry);
 
-            // Also remove any non-optimistic live queued items from language_server before sending continuation prompt
-            const liveQueue = cloneQueuedInputs(info.queuedUserInputs).filter(q => q.msgId && !String(q.msgId).startsWith("opt-"));
+            const liveQueue = cloneQueuedInputs(info.queuedUserInputs);
             if (liveQueue.length > 0 && info.lsClient && typeof info.lsClient.deleteAgentMessage === "function" && info.rawCascadeId) {
                 for (const qItem of liveQueue) {
                     if (queueToRestore.length === 0) {
                         queueToRestore.push(qItem);
                     }
-                    try {
-                        await info.lsClient.deleteAgentMessage({
-                            messageId: qItem.msgId,
-                            recipient: info.rawCascadeId,
-                        });
-                    } catch {}
+                    if (qItem.msgId) {
+                        try {
+                            await info.lsClient.deleteAgentMessage({
+                                messageId: qItem.msgId,
+                                recipient: info.rawCascadeId,
+                            });
+                        } catch {}
+                    }
                 }
                 await new Promise(r => setTimeout(r, 75));
             }
@@ -912,8 +920,131 @@ PAUSE_RENDERER_JS = r"""(() => {
             console.error("[AntigravityPause] Error resuming execution:", err);
         } finally {
             pausedMap.delete(key);
+            savePausedStateToStorage();
             syncFooter(footerEl);
         }
+    }
+
+    function extractStepPreviewText(step) {
+        if (!step || !Array.isArray(step.items)) return "Queued message";
+        const parts = [];
+        for (const it of step.items) {
+            if (!it || !it.chunk) continue;
+            if (it.chunk.case === "text" && typeof it.chunk.value === "string") {
+                parts.push(it.chunk.value);
+            } else if (it.chunk.case === "item" && it.chunk.value?.scopeItem) {
+                const si = it.chunk.value.scopeItem;
+                const label = si.value?.itemLabel || si.value?.name || si.value?.title || si.case || "item";
+                parts.push(`@${label}`);
+            }
+        }
+        const text = parts.join("").replace(/\s+/g, " ").trim();
+        if (text) return text;
+        if (Array.isArray(step.media) && step.media.length > 0) {
+            return `${step.media.length} attachment(s)`;
+        }
+        return "Queued message";
+    }
+
+    function syncHeldQueueCard(footerEl, info, entry) {
+        const inputBoxEl = footerEl.closest('[data-testid="agent-input-box"]');
+        if (!inputBoxEl) return;
+        const floatingContainer = inputBoxEl.firstElementChild;
+        if (!floatingContainer) return;
+
+        let card = floatingContainer.querySelector(":scope > .agy-held-queue-card");
+        const items = (entry && (entry.status === "paused" || entry.status === "pausing") && Array.isArray(entry.heldQueue))
+            ? entry.heldQueue
+            : [];
+
+        if (items.length === 0) {
+            if (card) card.remove();
+            return;
+        }
+
+        if (!card) {
+            card = document.createElement("div");
+            card.className = "agy-held-queue-card";
+            floatingContainer.insertBefore(card, floatingContainer.firstChild);
+        }
+
+        const sig = items.map(it => `${it.msgId || ""}:${extractStepPreviewText(it.step)}`).join("|");
+        if (card.getAttribute("data-sig") === sig) return;
+        card.setAttribute("data-sig", sig);
+        card.innerHTML = "";
+
+        const header = document.createElement("div");
+        header.className = "agy-held-queue-header";
+
+        const titleSpan = document.createElement("span");
+        titleSpan.textContent = "Queued Messages";
+        const countSpan = document.createElement("span");
+        countSpan.className = "agy-held-queue-count";
+        countSpan.textContent = String(items.length);
+        const subSpan = document.createElement("span");
+        subSpan.className = "agy-held-queue-subtitle";
+        subSpan.textContent = "Sends after agent resumes working";
+
+        header.appendChild(titleSpan);
+        header.appendChild(countSpan);
+        header.appendChild(subSpan);
+        card.appendChild(header);
+
+        const listEl = document.createElement("div");
+        listEl.className = "agy-held-queue-list";
+
+        items.forEach((qItem, idx) => {
+            const row = document.createElement("div");
+            row.className = "agy-held-queue-row";
+
+            const textEl = document.createElement("div");
+            textEl.className = "agy-held-queue-text";
+            textEl.textContent = extractStepPreviewText(qItem.step);
+
+            const actionsEl = document.createElement("div");
+            actionsEl.className = "agy-held-queue-actions";
+
+            const editBtn = document.createElement("button");
+            editBtn.type = "button";
+            editBtn.className = "agy-held-queue-action-btn";
+            editBtn.title = "Edit queued message";
+            editBtn.innerHTML = EDIT_SVG;
+            editBtn.addEventListener("click", (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                const latestInfo = inspectFooterFiber(footerEl) || info;
+                const removed = entry.heldQueue.splice(idx, 1)[0];
+                savePausedStateToStorage();
+                if (removed && latestInfo?.submitCtx?.inputControls?.restoreInput) {
+                    try {
+                        latestInfo.submitCtx.inputControls.restoreInput(removed.step?.items || [], removed.step?.media || []);
+                        latestInfo.lexicalRef?.current?.focus?.();
+                    } catch {}
+                }
+                syncFooter(footerEl);
+            });
+
+            const delBtn = document.createElement("button");
+            delBtn.type = "button";
+            delBtn.className = "agy-held-queue-action-btn";
+            delBtn.title = "Delete queued message";
+            delBtn.innerHTML = DELETE_SVG;
+            delBtn.addEventListener("click", (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                entry.heldQueue.splice(idx, 1);
+                savePausedStateToStorage();
+                syncFooter(footerEl);
+            });
+
+            actionsEl.appendChild(editBtn);
+            actionsEl.appendChild(delBtn);
+            row.appendChild(textEl);
+            row.appendChild(actionsEl);
+            listEl.appendChild(row);
+        });
+
+        card.appendChild(listEl);
     }
 
     function ensureSlot(footerEl) {
@@ -996,28 +1127,14 @@ PAUSE_RENDERER_JS = r"""(() => {
         return slot;
     }
 
-    function hasPausedNoticeInDOM() {
-        const notices = document.querySelectorAll("div.text-secondary-foreground");
-        for (let i = 0; i < notices.length; i++) {
-            const t = (notices[i].textContent || "").trim();
-            if (t === PAUSED_TEXT_REPLACEMENT || t === CANCELLED_TEXT_ORIG) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     function syncFooter(footerEl) {
         if (!footerEl || !footerEl.isConnected) return;
         const info = inspectFooterFiber(footerEl);
         const slot = ensureSlot(footerEl);
         if (!slot) return;
 
-        const sendBtn = footerEl.querySelector('button[data-testid="send-button"]');
-
         if (!info) {
             slot.setAttribute("data-hidden", "true");
-            if (sendBtn) sendBtn.removeAttribute("data-agy-hidden-send");
             return;
         }
 
@@ -1028,12 +1145,9 @@ PAUSE_RENDERER_JS = r"""(() => {
         if (prevKey && prevKey === "__default_pane__" && info.cascadeKey !== "__default_pane__" && pausedMap.has(prevKey)) {
             pausedMap.set(info.cascadeKey, pausedMap.get(prevKey));
             pausedMap.delete(prevKey);
+            savePausedStateToStorage();
         }
         footerEl.__agyLastCascadeKey = info.cascadeKey;
-
-        if (info.isRunning) {
-            explicitlyCancelledSet.delete(info.cascadeKey);
-        }
 
         let entry = pausedMap.get(info.cascadeKey);
 
@@ -1041,36 +1155,20 @@ PAUSE_RENDERER_JS = r"""(() => {
             entry.status = "paused";
             entry.sawIdleAfterPause = true;
             entry.pausedAt = Date.now();
-            for (const qItem of entry.heldQueue) {
-                attachOptimisticHandle(info, qItem);
-            }
+            savePausedStateToStorage();
         }
 
         if (entry && entry.status === "paused") {
             if (!info.isRunning) {
                 entry.sawIdleAfterPause = true;
             } else if (entry.sawIdleAfterPause && (Date.now() - entry.pausedAt > 800)) {
-                disposeHeldQueueHandles(entry);
                 pausedMap.delete(info.cascadeKey);
+                savePausedStateToStorage();
                 entry = undefined;
             }
         }
 
-        // Auto-recover paused state if session has "The process has been paused." notice and is IDLE
-        if (!entry && !info.isRunning && !explicitlyCancelledSet.has(info.cascadeKey) && hasPausedNoticeInDOM()) {
-            const initialHeld = cloneQueuedInputs(info.queuedUserInputs);
-            entry = {
-                status: "paused",
-                heldQueue: initialHeld,
-                capturedContext: capturePartialContext(info),
-                pausedAt: Date.now() - 1000,
-                sawIdleAfterPause: true,
-            };
-            pausedMap.set(info.cascadeKey, entry);
-            for (const qItem of entry.heldQueue) {
-                attachOptimisticHandle(info, qItem);
-            }
-        }
+        syncHeldQueueCard(footerEl, info, entry);
 
         const cancelWrap = slot.querySelector(".agy-cancel-wrap");
         const cancelBtn = slot.querySelector(".agy-pause-cancel-btn");
@@ -1082,16 +1180,6 @@ PAUSE_RENDERER_JS = r"""(() => {
         if (entry && (entry.status === "pausing" || entry.status === "paused" || entry.status === "resuming")) {
             slot.setAttribute("data-hidden", "false");
             cancelWrap.setAttribute("data-hidden", "false");
-
-            const canSend = !info.isInputEmpty || info.hasAttachments;
-            if (sendBtn) {
-                if (canSend) {
-                    sendBtn.removeAttribute("data-agy-hidden-send");
-                    sendBtn.setAttribute("aria-label", "Queue message");
-                } else {
-                    sendBtn.setAttribute("data-agy-hidden-send", "true");
-                }
-            }
 
             if (btn.getAttribute("data-mode") !== "play") {
                 btn.setAttribute("data-mode", "play");
@@ -1125,7 +1213,6 @@ PAUSE_RENDERER_JS = r"""(() => {
         } else if (info.isRunning) {
             slot.setAttribute("data-hidden", "false");
             cancelWrap.setAttribute("data-hidden", "true");
-            if (sendBtn) sendBtn.removeAttribute("data-agy-hidden-send");
 
             if (btn.getAttribute("data-mode") !== "pause") {
                 btn.setAttribute("data-mode", "pause");
@@ -1141,7 +1228,6 @@ PAUSE_RENDERER_JS = r"""(() => {
         } else {
             slot.setAttribute("data-hidden", "true");
             cancelWrap.setAttribute("data-hidden", "true");
-            if (sendBtn) sendBtn.removeAttribute("data-agy-hidden-send");
         }
     }
 
@@ -1188,20 +1274,20 @@ PAUSE_RENDERER_JS = r"""(() => {
     function syncSessionDOM() {
         const footerEl = document.querySelector(".agy-composer-footer");
         const activeKey = footerEl?.__agyLastCascadeKey;
-        const isExplicitlyCancelled = activeKey ? explicitlyCancelledSet.has(activeKey) : false;
+        const isCurrentlyPaused = Boolean(activeKey && pausedMap.has(activeKey));
 
-        // 1. Toggle between "User cancelled agent execution." and "The process has been paused."
+        // 1. Toggle notice text based on whether the active session is currently paused
         const cancelNotices = document.querySelectorAll("div.text-secondary-foreground, [aria-live]");
         for (let i = 0; i < cancelNotices.length; i++) {
             const el = cancelNotices[i];
             if (el.childNodes.length === 1 && el.firstChild && el.firstChild.nodeType === 3) {
-                if (isExplicitlyCancelled) {
-                    if (el.firstChild.nodeValue === PAUSED_TEXT_REPLACEMENT) {
-                        el.firstChild.nodeValue = CANCELLED_TEXT_ORIG;
-                    }
-                } else {
+                if (isCurrentlyPaused) {
                     if (el.firstChild.nodeValue === CANCELLED_TEXT_ORIG) {
                         el.firstChild.nodeValue = PAUSED_TEXT_REPLACEMENT;
+                    }
+                } else {
+                    if (el.firstChild.nodeValue === PAUSED_TEXT_REPLACEMENT) {
+                        el.firstChild.nodeValue = CANCELLED_TEXT_ORIG;
                     }
                 }
             }
@@ -1290,17 +1376,15 @@ PAUSE_RENDERER_JS = r"""(() => {
     }
 
     function syncAllFooters() {
-        syncSessionDOM();
         const footers = document.querySelectorAll(".agy-composer-footer");
         for (let i = 0; i < footers.length; i++) {
             syncFooter(footers[i]);
         }
+        syncSessionDOM();
     }
 
     let rafPending = false;
     function scheduleSync() {
-        // Run DOM text replacement and continuation-prompt hiding synchronously in microtask before paint
-        syncSessionDOM();
         if (rafPending) return;
         rafPending = true;
         requestAnimationFrame(() => {
@@ -1313,7 +1397,6 @@ PAUSE_RENDERER_JS = r"""(() => {
     observer.observe(document.documentElement, {
         childList: true,
         subtree: true,
-        characterData: true,
         attributes: true,
         attributeFilter: ["class", "disabled", "data-testid", "aria-label"],
     });
