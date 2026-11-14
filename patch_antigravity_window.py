@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.7"
+__version__ = "1.3.8"
 
 import argparse
 import ast
@@ -261,6 +261,7 @@ PAUSE_RENDERER_JS = r"""(() => {
                 color: var(--color-foreground, #ffffff);
             }
             div[role="article"][aria-label="User message"][data-agy-hidden-resume="true"],
+            [data-testid="user-message"][data-agy-hidden-resume="true"],
             [data-testid="pending-user-messages"] > div[data-agy-hidden-resume="true"],
             div[data-agy-hidden-turn-footer="true"],
             div[data-agy-hidden-native-queue="true"] {
@@ -791,9 +792,24 @@ PAUSE_RENDERER_JS = r"""(() => {
         return infoObj;
     }
 
+    function getAgentStateSnapshot(info) {
+        try {
+            const peeked = (info?.rawCascadeId && info?.optProvider?.registry?.peek)
+                ? info.optProvider.registry.peek(info.rawCascadeId)
+                : null;
+            const trueAgentState = peeked?.trueState?.getState?.()?.agentState;
+            if (trueAgentState) return trueAgentState;
+        } catch {}
+        try {
+            return info?.stepHandlerCtx?.cascadeContext?.state?.agentStateProvider?.getState?.() || null;
+        } catch {
+            return null;
+        }
+    }
+
     function capturePartialContext(info) {
         try {
-            const state = info.stepHandlerCtx?.cascadeContext?.state?.agentStateProvider?.getState?.();
+            const state = getAgentStateSnapshot(info);
             const slice = state?.trajectorySlice;
             const steps = slice?.stepsInSlice;
             if (!Array.isArray(steps) || steps.length === 0) return null;
@@ -828,7 +844,7 @@ PAUSE_RENDERER_JS = r"""(() => {
             return basePrompt;
         }
         try {
-            const stateAfter = info.stepHandlerCtx?.cascadeContext?.state?.agentStateProvider?.getState?.();
+            const stateAfter = getAgentStateSnapshot(info);
             const stepsAfter = stateAfter?.trajectorySlice?.stepsInSlice || [];
             const lastCaptured = captured.tail[captured.tail.length - 1];
             if (!lastCaptured || (!lastCaptured.response && !lastCaptured.thinking)) {
@@ -1497,20 +1513,41 @@ PAUSE_RENDERER_JS = r"""(() => {
 
     function isResumeUserMessage(msgEl) {
         if (!msgEl) return false;
-        const rawText = (msgEl.textContent || "").trim();
+        let rawText = (msgEl.textContent || "").trim();
+        const srOnlyHeading = msgEl.firstElementChild;
+        if (srOnlyHeading && srOnlyHeading.tagName === "H5" && srOnlyHeading.classList.contains("sr-only")) {
+            const headingText = (srOnlyHeading.textContent || "").trim();
+            if (headingText && rawText.startsWith(headingText)) {
+                rawText = rawText.slice(headingText.length).trim();
+            }
+        }
+        rawText = rawText.replace(/^You said\s*/i, "");
         if (
             rawText.startsWith(RESUME_PROMPT_EN) ||
             rawText.startsWith(RESUME_PROMPT_PT_LEGACY)
         ) {
             return true;
         }
+        const seeds = [];
+        const stepEl = msgEl.querySelector('[data-testid="user-input-step"]');
+        if (stepEl) {
+            const stepFiber = getReactFiber(stepEl);
+            if (stepFiber) {
+                if (stepFiber.return) seeds.push(stepFiber.return);
+                seeds.push(stepFiber);
+            }
+        }
         const startFiber = getReactFiber(msgEl);
-        if (startFiber) {
-            const queue = [startFiber];
+        if (startFiber) seeds.push(startFiber);
+
+        if (seeds.length > 0) {
+            const queue = seeds.slice();
+            const seen = new Set();
             let visited = 0;
-            while (queue.length > 0 && visited < 20) {
+            while (queue.length > 0 && visited < 30) {
                 const f = queue.shift();
-                if (!f) continue;
+                if (!f || seen.has(f)) continue;
+                seen.add(f);
                 visited++;
                 const mp = f.memoizedProps;
                 if (mp && typeof mp === "object") {
@@ -1529,7 +1566,7 @@ PAUSE_RENDERER_JS = r"""(() => {
                     }
                 }
                 if (f.child) queue.push(f.child);
-                if (visited > 1 && f.sibling) queue.push(f.sibling);
+                if (f !== startFiber && f.sibling) queue.push(f.sibling);
             }
         }
         return false;
@@ -1559,7 +1596,7 @@ PAUSE_RENDERER_JS = r"""(() => {
         }
 
         // 2. Hide internal continuation prompts from the session UI
-        const userMsgs = document.querySelectorAll('div[role="article"][aria-label="User message"]');
+        const userMsgs = document.querySelectorAll('div[role="article"][aria-label="User message"], [data-testid="user-message"]');
         const resumeTurnOuters = new Set();
 
         for (let i = 0; i < userMsgs.length; i++) {
@@ -1576,7 +1613,7 @@ PAUSE_RENDERER_JS = r"""(() => {
                         pendingRow.setAttribute("data-agy-hidden-resume", "true");
                     }
                 } else {
-                    const turnInner = msgEl.parentElement;
+                    const turnInner = msgEl.closest('[data-turn-content]') || msgEl.parentElement;
                     const turnOuter = turnInner ? turnInner.parentElement : null;
                     if (turnOuter) {
                         resumeTurnOuters.add(turnOuter);
@@ -2503,12 +2540,15 @@ def generate_pause_patched_utils_js(original_code: str) -> str:
     pause_prelude = f"\n{PAUSE_PATCH_MARKER}\n{expected_decl}\n"
 
     pause_listeners = f"""    {PAUSE_PATCH_MARKER}
+    const _agyPauseWc = (typeof getHubWebContents === "function" ? getHubWebContents(win) : null) || win.webContents;
     const _injectAntigravityPausePlay = () => {{
-        if (win.isDestroyed()) return;
-        win.webContents.executeJavaScript(_ANTIGRAVITY_PAUSE_PLAY_SCRIPT).catch(() => {{}});
+        if (win.isDestroyed() || !_agyPauseWc || (typeof _agyPauseWc.isDestroyed === "function" && _agyPauseWc.isDestroyed())) return;
+        _agyPauseWc.executeJavaScript(_ANTIGRAVITY_PAUSE_PLAY_SCRIPT).catch(() => {{}});
     }};
-    win.webContents.on("dom-ready", _injectAntigravityPausePlay);
-    win.webContents.on("did-finish-load", _injectAntigravityPausePlay);"""
+    if (_agyPauseWc && !(typeof _agyPauseWc.isDestroyed === "function" && _agyPauseWc.isDestroyed())) {{
+        _agyPauseWc.on("dom-ready", _injectAntigravityPausePlay);
+        _agyPauseWc.on("did-finish-load", _injectAntigravityPausePlay);
+    }}"""
 
     target_load_url = "void win.loadURL(url);"
     if target_load_url in original_code:
