@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.9"
+__version__ = "1.3.10"
 
 import argparse
 import ast
@@ -2809,24 +2809,43 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
     )
 
     if is_app_running(app_paths):
-        if force_kill:
+        app_name = get_app_display_name(app_paths)
+        if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
+            log_warn(f"{app_name} is currently running (script launched from inside its integrated terminal/session).")
+            log("Applying patch in-place safely without terminating current session...")
+            log(f"Please restart {app_name} after patching to load the updated functionality.")
+        elif force_kill:
             kill_running_app(app_paths)
         else:
-            log_warn("Antigravity is currently running.")
-            if sys.stdin.isatty():
-                try:
-                    resp = input("Do you want to close Antigravity to apply the patch now? [y/N]: ").strip().lower()
-                    if resp in ("y", "yes", "s", "sim"):
-                        kill_running_app(app_paths)
-                    else:
-                        log_error("Operation aborted. Please close Antigravity before applying the patch.")
+            log_warn(f"{app_name} is currently running.")
+            if sys.platform.startswith("linux"):
+                if sys.stdin.isatty():
+                    try:
+                        resp = input(f"Do you want to close {app_name} to apply the patch now? [y/N]: ").strip().lower()
+                        if resp in ("y", "yes", "s", "sim"):
+                            kill_running_app(app_paths)
+                        else:
+                            log(f"Applying patch in-place without closing. Please restart {app_name} when done.")
+                    except (EOFError, KeyboardInterrupt):
+                        log_error("\nOperation aborted.")
                         sys.exit(1)
-                except (EOFError, KeyboardInterrupt):
-                    log_error("\nOperation aborted.")
-                    sys.exit(1)
+                else:
+                    log(f"Applying patch in-place safely without closing. Please restart {app_name} when done.")
             else:
-                log_error("Antigravity is running. Close it or use --kill to automatically terminate it.")
-                sys.exit(1)
+                if sys.stdin.isatty():
+                    try:
+                        resp = input(f"Do you want to close {app_name} to apply the patch now? [y/N]: ").strip().lower()
+                        if resp in ("y", "yes", "s", "sim"):
+                            kill_running_app(app_paths)
+                        else:
+                            log_error(f"Operation aborted. Please close {app_name} before applying the patch.")
+                            sys.exit(1)
+                    except (EOFError, KeyboardInterrupt):
+                        log_error("\nOperation aborted.")
+                        sys.exit(1)
+                else:
+                    log_error(f"{app_name} is running. Close it or use --kill to automatically terminate it.")
+                    sys.exit(1)
 
     try:
         with open(asar_path, "rb") as f:
@@ -2945,6 +2964,9 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
         print("  • Pausing freezes current prompt execution and preserves queued messages.")
     print(f"  • Original backup preserved at: {backup_orig}")
     print("=" * 62 + "\n")
+    if is_app_running(app_paths):
+        app_name = get_app_display_name(app_paths)
+        log(f"\033[1;33m[!] Notice: {app_name} is currently running. Please restart the application to activate the changes.\033[0m")
 
 
 def find_pending_update() -> tuple:
@@ -4183,20 +4205,43 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = 
             log_warn("Proceeding with restore due to --force flag.")
 
     if is_app_running(app_paths):
-        if force_kill:
+        app_name = get_app_display_name(app_paths)
+        if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
+            log_warn(f"{app_name} is currently running (script launched from inside its integrated terminal/session).")
+            log("Restoring backup in-place safely without terminating current session...")
+            log(f"Please restart {app_name} when convenient to reload stock version.")
+        elif force_kill:
             kill_running_app(app_paths)
         else:
-            log_warn("Antigravity is currently running.")
-            if sys.stdin.isatty():
-                resp = input("Do you want to close Antigravity to restore the backup? [y/N]: ").strip().lower()
-                if resp in ("y", "yes", "s", "sim"):
-                    kill_running_app(app_paths)
+            log_warn(f"{app_name} is currently running.")
+            if sys.platform.startswith("linux"):
+                if sys.stdin.isatty():
+                    try:
+                        resp = input(f"Do you want to close {app_name} to restore the backup? [y/N]: ").strip().lower()
+                        if resp in ("y", "yes", "s", "sim"):
+                            kill_running_app(app_paths)
+                        else:
+                            log(f"Restoring backup in-place without closing. Please restart {app_name} when convenient.")
+                    except (EOFError, KeyboardInterrupt):
+                        log_error("\nOperation aborted.")
+                        sys.exit(1)
                 else:
-                    log_error("Operation aborted.")
-                    sys.exit(1)
+                    log(f"Restoring backup in-place safely without closing. Please restart {app_name} when convenient.")
             else:
-                log_error("Antigravity is running. Close it or use --kill to restore.")
-                sys.exit(1)
+                if sys.stdin.isatty():
+                    try:
+                        resp = input(f"Do you want to close {app_name} to restore the backup? [y/N]: ").strip().lower()
+                        if resp in ("y", "yes", "s", "sim"):
+                            kill_running_app(app_paths)
+                        else:
+                            log_error(f"Operation aborted. Please close {app_name} before restoring.")
+                            sys.exit(1)
+                    except (EOFError, KeyboardInterrupt):
+                        log_error("\nOperation aborted.")
+                        sys.exit(1)
+                else:
+                    log_error(f"{app_name} is running. Close it or use --kill to restore.")
+                    sys.exit(1)
 
     log(f"Restoring {backup_orig} -> {asar_path}...")
     try:
