@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.8"
+__version__ = "1.3.9"
 
 import argparse
 import ast
@@ -1893,29 +1893,47 @@ def get_default_candidate_paths() -> list:
         ])
     else:
         # Linux / Unix
+        # Check existing desktop files to resolve installation path dynamically
+        for dname in ("antigravity.desktop", "antigravity-ide.desktop"):
+            df = os.path.expanduser(f"~/.local/share/applications/{dname}")
+            if os.path.isfile(df):
+                try:
+                    with open(df, "r", encoding="utf-8", errors="ignore") as f:
+                        for line in f:
+                            if line.startswith("Exec="):
+                                m = re.search(r'Exec="?([^"%\n]+)"?', line)
+                                if m:
+                                    bin_p = m.group(1).strip()
+                                    if os.path.isfile(bin_p):
+                                        candidates.append(os.path.dirname(bin_p))
+                                break
+                except Exception:
+                    pass
+
         candidates.extend([
-            "/opt/Antigravity",
-            "/opt/antigravity",
-            "/opt/Antigravity IDE",
-            "/opt/antigravity-ide",
-            "/usr/lib/antigravity",
-            "/usr/lib/Antigravity",
-            "/usr/lib/antigravity-ide",
-            "/usr/share/antigravity",
-            "/usr/share/Antigravity",
-            "/usr/share/antigravity-ide",
-            os.path.expanduser("~/.local/share/antigravity"),
+            os.path.expanduser("~/Downloads/Antigravity"),
+            os.path.expanduser("~/Downloads/antigravity"),
+            os.path.expanduser("~/Downloads/Antigravity IDE"),
+            os.path.expanduser("~/Downloads/antigravity-ide"),
+            os.path.expanduser("~/Downloads/Antigravity-Linux-x64"),
+            os.path.expanduser("~/Downloads/antigravity-linux-x64"),
             os.path.expanduser("~/.local/share/Antigravity"),
+            os.path.expanduser("~/.local/share/antigravity"),
             os.path.expanduser("~/.local/share/antigravity-ide"),
             os.path.expanduser("~/Applications/Antigravity"),
             os.path.expanduser("~/Applications/antigravity"),
             os.path.expanduser("~/Applications/Antigravity IDE"),
             os.path.expanduser("~/Applications/antigravity-ide"),
-            os.path.expanduser("~/Downloads/Antigravity-Linux-x64"),
-            os.path.expanduser("~/Downloads/antigravity-linux-x64"),
-            os.path.expanduser("~/Downloads/Antigravity"),
-            os.path.expanduser("~/Downloads/Antigravity IDE"),
-            os.path.expanduser("~/Downloads/antigravity-ide"),
+            "/opt/Antigravity",
+            "/opt/antigravity",
+            "/opt/Antigravity IDE",
+            "/opt/antigravity-ide",
+            "/usr/lib/Antigravity",
+            "/usr/lib/antigravity",
+            "/usr/lib/antigravity-ide",
+            "/usr/share/Antigravity",
+            "/usr/share/antigravity",
+            "/usr/share/antigravity-ide",
         ])
 
         # Resolve from PATH if available
@@ -1935,6 +1953,17 @@ def find_antigravity_app(custom_path: str = None) -> AppPaths:
         resolved = resolve_app_structure(custom_path)
         if resolved:
             return resolved
+        # Fallback check for common path renaming (e.g., Antigravity IDE -> Antigravity or vice versa)
+        alt_paths = []
+        if "Antigravity IDE" in custom_path:
+            alt_paths.append(custom_path.replace("Antigravity IDE", "Antigravity"))
+        elif "antigravity-ide" in custom_path:
+            alt_paths.append(custom_path.replace("antigravity-ide", "antigravity"))
+        for alt in alt_paths:
+            alt_resolved = resolve_app_structure(alt)
+            if alt_resolved:
+                log_warn(f"Specified path '{custom_path}' not found, but resolved active installation at: {alt_resolved.app_root}")
+                return alt_resolved
         log_error(f"Specified path does not contain a valid Antigravity installation: {custom_path}")
         sys.exit(1)
 
@@ -2251,6 +2280,29 @@ def get_app_product_info(app_paths: AppPaths) -> dict:
         except Exception:
             pass
     return {}
+
+
+def is_ide_app(app_paths: AppPaths) -> bool:
+    """Returns True if the installation is Antigravity IDE (VS Code fork), False for standard Antigravity."""
+    if not app_paths:
+        return False
+    if app_paths.is_unpacked:
+        return True
+    product = get_app_product_info(app_paths)
+    if (
+        "ideVersion" in product
+        or product.get("applicationName") == "antigravity-ide"
+        or product.get("nameShort") == "Antigravity IDE"
+    ):
+        return True
+    if app_paths.app_root and os.path.isfile(os.path.join(app_paths.app_root, "antigravity-ide")):
+        return True
+    return False
+
+
+def get_app_display_name(app_paths: AppPaths) -> str:
+    """Returns the display product name for the app: 'Antigravity IDE' or 'Antigravity'."""
+    return "Antigravity IDE" if is_ide_app(app_paths) else "Antigravity"
 
 
 def build_asar(header: dict, payload: bytes) -> bytes:
@@ -2918,7 +2970,11 @@ def find_pending_update() -> tuple:
             os.path.expanduser("~/.cache/com.google.antigravity/pending"),
             os.path.expanduser("~/.cache/antigravity-updater/pending"),
             os.path.expanduser("~/.cache/antigravity-ide-updater/pending"),
+            os.path.expanduser("~/.cache/Antigravity/pending"),
+            os.path.expanduser("~/.cache/antigravity/pending"),
             os.path.expanduser("~/.cache/Antigravity IDE/pending"),
+            os.path.expanduser("~/.config/Antigravity/pending"),
+            os.path.expanduser("~/.config/antigravity/pending"),
             os.path.expanduser("~/.config/Antigravity IDE/pending"),
             os.path.expanduser("~/.config/antigravity-ide/pending"),
         ]
@@ -2981,15 +3037,10 @@ def check_online_update(app_paths: AppPaths) -> dict:
     if not app_paths:
         return None
     try:
-        product = get_app_product_info(app_paths)
-        is_ide = (
-            app_paths.is_unpacked
-            or "ideVersion" in product
-            or product.get("applicationName") == "antigravity-ide"
-            or product.get("nameShort") == "Antigravity IDE"
-        )
-        if not is_ide:
+        if not is_ide_app(app_paths):
             return None
+
+        product = get_app_product_info(app_paths)
 
         machine = platform.machine().lower()
         arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
@@ -3127,21 +3178,15 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
         except Exception:
             pass
 
+    app_name = get_app_display_name(app_paths)
     update_file, update_version = find_pending_update()
 
     if not update_file:
-        product = get_app_product_info(app_paths)
-        is_ide = (
-            app_paths.is_unpacked
-            or "ideVersion" in product
-            or product.get("applicationName") == "antigravity-ide"
-            or product.get("nameShort") == "Antigravity IDE"
-        )
-        if is_ide:
-            log("Checking official Antigravity IDE update server for available updates...")
+        if is_ide_app(app_paths):
+            log(f"Checking official {app_name} update server for available updates...")
             online_update = check_online_update(app_paths)
             if not online_update:
-                log_success("Antigravity IDE is already up to date! No updates available.")
+                log_success(f"{app_name} is already up to date! No updates available.")
                 return
 
             update_version = online_update["version"]
@@ -3164,7 +3209,7 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
             update_file = dest_file
         else:
             log_warn("No pending official update found in local updater cache.")
-            log("If Antigravity recently notified you of an update, ensure it has finished downloading.")
+            log(f"If {app_name} recently notified you of an update, ensure it has finished downloading.")
             log("You can also download the latest version directly from https://antigravity.google/download")
             return
 
@@ -3195,7 +3240,7 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
     if current_installed_ver and update_version != "latest":
         if parse_version_tuple(current_installed_ver) >= parse_version_tuple(update_version):
             log_success(
-                f"Antigravity is already updated to version v{current_installed_ver} "
+                f"{app_name} is already updated to version v{current_installed_ver} "
                 f"(cached update file was v{update_version})."
             )
             log("Applying window persistence patch to current installation...")
@@ -3208,7 +3253,7 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
                 shutil.rmtree(os.path.dirname(update_file), ignore_errors=True)
             except Exception:
                 pass
-            log_success(f"All set! Antigravity v{current_installed_ver} is patched with window persistence active.")
+            log_success(f"All set! {app_name} v{current_installed_ver} is patched with window persistence active.")
             return
 
     log(f"Found update package: v{update_version} ({update_file})")
@@ -3217,22 +3262,22 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
         if is_app_running(app_paths):
             # On Linux, check if the updater is being run from inside Antigravity itself
             if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
-                log_warn("Antigravity is currently running (updater launched from inside its integrated terminal).")
+                log_warn(f"{app_name} is currently running (updater launched from inside its integrated terminal).")
                 log("Applying update in-place safely without terminating current session...")
-                log("Please restart Antigravity IDE after the update completes to load the new version.")
+                log(f"Please restart {app_name} after the update completes to load the new version.")
                 return True
 
             if force_kill:
                 kill_running_app(app_paths)
                 return True
 
-            log_warn("Antigravity is currently running. It must be closed to apply the update.")
+            log_warn(f"{app_name} is currently running. It must be closed to apply the update.")
             if sys.platform.startswith("linux"):
                 if sys.stdin.isatty():
                     try:
-                        ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
+                        ans = input(f"Close {app_name} automatically and continue with update? [Y/n]: ").strip().lower()
                         if ans and ans not in ("y", "yes", "s", "sim"):
-                            log("Applying update in-place without closing. Please restart Antigravity IDE when done.")
+                            log(f"Applying update in-place without closing. Please restart {app_name} when done.")
                             return True
                         kill_running_app(app_paths)
                         return True
@@ -3240,12 +3285,12 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
                         log_error("\nUpdate cancelled.")
                         return False
                 else:
-                    log("Applying update in-place safely without closing. Please restart Antigravity IDE when done.")
+                    log(f"Applying update in-place safely without closing. Please restart {app_name} when done.")
                     return True
             else:
                 if sys.stdin.isatty():
                     try:
-                        ans = input("Close Antigravity automatically and continue with update? [Y/n]: ").strip().lower()
+                        ans = input(f"Close {app_name} automatically and continue with update? [Y/n]: ").strip().lower()
                         if ans and ans not in ("y", "yes", "s", "sim"):
                             log_error("Update cancelled by user.")
                             return False
@@ -3255,7 +3300,7 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
                         log_error("\nUpdate cancelled.")
                         return False
                 else:
-                    log_error("Antigravity is running. Close it or use --kill to automatically terminate it before updating.")
+                    log_error(f"{app_name} is running. Close it or use --kill to automatically terminate it before updating.")
                     sys.exit(1)
         return True
 
@@ -3432,6 +3477,15 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
                             os.chmod(bp, 0o755)
                         except Exception:
                             pass
+            res_bin_dir = os.path.join(app_paths.app_root, "resources", "bin")
+            if os.path.isdir(res_bin_dir):
+                for b in os.listdir(res_bin_dir):
+                    bp = os.path.join(res_bin_dir, b)
+                    if os.path.isfile(bp):
+                        try:
+                            os.chmod(bp, 0o755)
+                        except Exception:
+                            pass
 
         log_success(f"Official update v{update_version} files installed successfully!")
 
@@ -3452,7 +3506,11 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
         os.path.expanduser("~/.cache/com.google.antigravity/pending"),
         os.path.expanduser("~/.cache/antigravity-updater/pending"),
         os.path.expanduser("~/.cache/antigravity-ide-updater/pending"),
+        os.path.expanduser("~/.cache/Antigravity/pending"),
+        os.path.expanduser("~/.cache/antigravity/pending"),
         os.path.expanduser("~/.cache/Antigravity IDE/pending"),
+        os.path.expanduser("~/.config/Antigravity/pending"),
+        os.path.expanduser("~/.config/antigravity/pending"),
         os.path.expanduser("~/.config/Antigravity IDE/pending"),
         os.path.expanduser("~/.config/antigravity-ide/pending"),
     ]:
@@ -3469,37 +3527,57 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
     if sys.platform.startswith("linux"):
         ensure_linux_desktop_entry(new_app_paths)
 
-    final_ver = (
-        extract_app_version_from_dir(new_app_paths.app_dir)
-        if new_app_paths.is_unpacked
-        else update_version
-    )
-    log_success(f"All set! Antigravity is now updated to v{final_ver} with window persistence active.")
+    final_ver = update_version
+    if new_app_paths.is_unpacked:
+        final_ver = extract_app_version_from_dir(new_app_paths.app_dir)
+    elif new_app_paths.asar_path and os.path.exists(new_app_paths.asar_path):
+        try:
+            h, p = parse_asar(new_app_paths.asar_path)
+            extracted_ver = extract_app_version_from_asar(h, p)
+            if extracted_ver and extracted_ver != "unknown":
+                final_ver = extracted_ver
+        except Exception:
+            pass
+
+    app_name = get_app_display_name(new_app_paths)
+    log_success(f"All set! {app_name} is now updated to v{final_ver} with window persistence active.")
     if is_app_running(new_app_paths):
-        log("\033[1;33m[!] Notice: Antigravity is currently running. Please restart the application to launch the newly installed version.\033[0m")
+        log(f"\033[1;33m[!] Notice: {app_name} is currently running. Please restart the application to launch the newly installed version.\033[0m")
 
 
 def ensure_linux_desktop_entry(app_paths: AppPaths, force: bool = False) -> bool:
     """Ensures a Linux desktop shortcut (.desktop) and application menu entry exist.
 
-    If not already present or if force is True, creates ~/.local/share/applications/antigravity-ide.desktop
-    with the official icon installed to the user's icon directory.
+    If not already present or if force is True, creates ~/.local/share/applications/antigravity.desktop
+    (or antigravity-ide.desktop for Antigravity IDE) with the official icon installed to the user's icon directory.
+    Cleans up obsolete opposite shortcuts if they point to the current installation or broken paths.
     """
     if not sys.platform.startswith("linux") or not app_paths:
         return False
 
     desktop_dir = os.path.expanduser("~/.local/share/applications")
-    desktop_file = os.path.join(desktop_dir, "antigravity-ide.desktop")
+    is_ide = is_ide_app(app_paths)
+    desktop_filename = "antigravity-ide.desktop" if is_ide else "antigravity.desktop"
+    desktop_file = os.path.join(desktop_dir, desktop_filename)
 
     # Locate executable binary
     binary_path = None
-    for cand in (
-        os.path.join(app_paths.app_root, "antigravity-ide"),
-        os.path.join(app_paths.app_root, "antigravity"),
-        os.path.join(app_paths.app_root, "Antigravity"),
-        os.path.join(app_paths.app_root, "bin", "antigravity-ide"),
-        os.path.join(app_paths.app_root, "bin", "antigravity"),
-    ):
+    if is_ide:
+        candidate_binaries = (
+            os.path.join(app_paths.app_root, "antigravity-ide"),
+            os.path.join(app_paths.app_root, "bin", "antigravity-ide"),
+            os.path.join(app_paths.app_root, "antigravity"),
+            os.path.join(app_paths.app_root, "Antigravity"),
+        )
+    else:
+        candidate_binaries = (
+            os.path.join(app_paths.app_root, "antigravity"),
+            os.path.join(app_paths.app_root, "Antigravity"),
+            os.path.join(app_paths.app_root, "bin", "antigravity"),
+            os.path.join(app_paths.app_root, "antigravity-ide"),
+        )
+
+    for cand in candidate_binaries:
         if os.path.isfile(cand):
             binary_path = cand
             break
@@ -3508,49 +3586,48 @@ def ensure_linux_desktop_entry(app_paths: AppPaths, force: bool = False) -> bool
         if os.path.isfile(app_paths.app_root):
             binary_path = app_paths.app_root
         else:
-            which_bin = shutil.which("antigravity-ide") or shutil.which("antigravity")
+            if is_ide:
+                which_bin = shutil.which("antigravity-ide") or shutil.which("antigravity") or shutil.which("Antigravity")
+            else:
+                which_bin = shutil.which("antigravity") or shutil.which("Antigravity") or shutil.which("antigravity-ide")
             if which_bin:
                 binary_path = which_bin
 
     if not binary_path:
         return False
 
-    # Check if a desktop entry already exists pointing to this installation
-    if not force:
-        candidates = [
-            desktop_file,
-            os.path.join(desktop_dir, "antigravity.desktop"),
-            "/usr/share/applications/antigravity-ide.desktop",
-            "/usr/share/applications/antigravity.desktop",
-        ]
-        for c in candidates:
-            if os.path.isfile(c) and os.path.getsize(c) > 0:
-                try:
-                    with open(c, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
-                        if app_paths.app_root in content or binary_path in content or "Antigravity" in content:
-                            return True
-                except Exception:
-                    pass
+    # Clean up obsolete counterpart desktop file pointing to this installation or non-existent binary
+    # (e.g. antigravity-ide.desktop when running standalone Antigravity, or vice versa)
+    obsolete_filename = "antigravity.desktop" if is_ide else "antigravity-ide.desktop"
+    obsolete_file = os.path.join(desktop_dir, obsolete_filename)
+    if os.path.isfile(obsolete_file):
+        try:
+            with open(obsolete_file, "r", encoding="utf-8", errors="ignore") as f:
+                obs_content = f.read()
+            should_remove = False
+            if app_paths.app_root in obs_content or binary_path in obs_content:
+                should_remove = True
+            else:
+                m = re.search(r'^Exec="?([^"%\n]+)"?', obs_content, re.MULTILINE)
+                if m and not os.path.exists(m.group(1).strip()):
+                    should_remove = True
+            if should_remove:
+                os.remove(obsolete_file)
+                log(f"Removed obsolete desktop entry: {obsolete_file}")
+        except Exception:
+            pass
 
-    # Setup Icon: check repository for icon.png or antigravity.png
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    source_icon = None
-    for icon_name in ("icon.png", "antigravity.png"):
-        candidate_icon = os.path.join(script_dir, icon_name)
-        if os.path.isfile(candidate_icon) and os.path.getsize(candidate_icon) > 100:
-            source_icon = candidate_icon
-            break
+    # Check if the correct desktop entry already exists and points to this installation
+    if not force and os.path.isfile(desktop_file) and os.path.getsize(desktop_file) > 0:
+        try:
+            with open(desktop_file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            if (app_paths.app_root in content or binary_path in content) and "Exec=" in content and "Icon=" in content:
+                return True
+        except Exception:
+            pass
 
-    if not source_icon:
-        for cached in (
-            os.path.expanduser("~/.local/share/icons/antigravity.png"),
-            os.path.expanduser("~/.local/share/pixmaps/antigravity.png"),
-        ):
-            if os.path.isfile(cached):
-                source_icon = cached
-                break
-
+    # Setup Icon directories
     user_icons_dir = os.path.expanduser("~/.local/share/icons")
     hicolor_apps_dir = os.path.join(user_icons_dir, "hicolor", "512x512", "apps")
     pixmaps_dir = os.path.expanduser("~/.local/share/pixmaps")
@@ -3559,14 +3636,66 @@ def ensure_linux_desktop_entry(app_paths: AppPaths, force: bool = False) -> bool
     os.makedirs(hicolor_apps_dir, exist_ok=True)
     os.makedirs(pixmaps_dir, exist_ok=True)
 
-    dest_icon_path = os.path.join(user_icons_dir, "antigravity.png")
+    dest_icon_name = "antigravity-ide.png" if is_ide else "antigravity.png"
+    dest_icon_path = os.path.join(hicolor_apps_dir, dest_icon_name)
 
-    if source_icon and os.path.isfile(source_icon):
+    # 1. Try extracting icon directly from app.asar (standard Antigravity layout contains icon.png)
+    icon_bytes = None
+    if app_paths.asar_path and os.path.isfile(app_paths.asar_path):
+        try:
+            h, payload = parse_asar(app_paths.asar_path)
+            for iname in ("icon.png", "antigravity.png"):
+                if iname in h.get("files", {}):
+                    e = h["files"][iname]
+                    icon_bytes = payload[int(e["offset"]) : int(e["offset"]) + int(e["size"])]
+                    break
+        except Exception:
+            pass
+
+    # 2. Try repository root
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    source_icon = None
+    if not icon_bytes:
+        for icon_name in ("icon.png", "antigravity.png"):
+            candidate_icon = os.path.join(script_dir, icon_name)
+            if os.path.isfile(candidate_icon) and os.path.getsize(candidate_icon) > 100:
+                source_icon = candidate_icon
+                break
+
+    # 3. Try unpacked app or system caches
+    if not icon_bytes and not source_icon:
+        for cached in (
+            os.path.join(app_paths.app_root, "resources", "app", "resources", "linux", "code.png"),
+            os.path.expanduser("~/.local/share/icons/antigravity.png"),
+            os.path.expanduser("~/.local/share/icons/antigravity-ide.png"),
+            os.path.expanduser("~/.local/share/pixmaps/antigravity.png"),
+        ):
+            if os.path.isfile(cached) and os.path.getsize(cached) > 100:
+                source_icon = cached
+                break
+
+    if icon_bytes:
+        try:
+            for p in (
+                dest_icon_path,
+                os.path.join(user_icons_dir, "antigravity.png"),
+                os.path.join(pixmaps_dir, "antigravity.png"),
+            ):
+                with open(p, "wb") as f:
+                    f.write(icon_bytes)
+            if is_ide:
+                shutil.copy2(dest_icon_path, os.path.join(hicolor_apps_dir, "antigravity-ide.png"))
+                shutil.copy2(dest_icon_path, os.path.join(pixmaps_dir, "antigravity-ide.png"))
+        except Exception:
+            pass
+    elif source_icon and os.path.isfile(source_icon):
         try:
             shutil.copy2(source_icon, dest_icon_path)
-            shutil.copy2(source_icon, os.path.join(hicolor_apps_dir, "antigravity-ide.png"))
-            shutil.copy2(source_icon, os.path.join(pixmaps_dir, "antigravity-ide.png"))
+            shutil.copy2(source_icon, os.path.join(user_icons_dir, "antigravity.png"))
             shutil.copy2(source_icon, os.path.join(pixmaps_dir, "antigravity.png"))
+            if is_ide:
+                shutil.copy2(source_icon, os.path.join(hicolor_apps_dir, "antigravity-ide.png"))
+                shutil.copy2(source_icon, os.path.join(pixmaps_dir, "antigravity-ide.png"))
         except Exception:
             pass
     elif not os.path.isfile(dest_icon_path):
@@ -3578,7 +3707,9 @@ def ensure_linux_desktop_entry(app_paths: AppPaths, force: bool = False) -> bool
                 if data:
                     with open(dest_icon_path, "wb") as f:
                         f.write(data)
-                    with open(os.path.join(hicolor_apps_dir, "antigravity-ide.png"), "wb") as f:
+                    with open(os.path.join(user_icons_dir, "antigravity.png"), "wb") as f:
+                        f.write(data)
+                    with open(os.path.join(pixmaps_dir, "antigravity.png"), "wb") as f:
                         f.write(data)
         except Exception:
             pass
@@ -3588,7 +3719,8 @@ def ensure_linux_desktop_entry(app_paths: AppPaths, force: bool = False) -> bool
     except Exception:
         pass
 
-    desktop_content = f"""[Desktop Entry]
+    if is_ide:
+        desktop_content = f"""[Desktop Entry]
 Name=Antigravity IDE
 Comment=Google Antigravity IDE
 GenericName=Integrated Development Environment
@@ -3609,6 +3741,22 @@ Name[pt_BR]=Nova Janela Vazia
 Exec="{binary_path}" --new-window %F
 Icon={dest_icon_path}
 """
+    else:
+        desktop_content = f"""[Desktop Entry]
+Name=Antigravity
+Comment=Google Antigravity - Agentic Desktop Application
+GenericName=AI Assistant
+Exec="{binary_path}" %u
+Icon={dest_icon_path}
+Type=Application
+StartupNotify=true
+StartupWMClass=antigravity
+Categories=Development;
+MimeType=x-scheme-handler/antigravity;
+Keywords=antigravity;agent;chat;ai;deepmind;google;
+Path={app_paths.app_root}
+"""
+
     try:
         os.makedirs(desktop_dir, exist_ok=True)
         with open(desktop_file, "w", encoding="utf-8") as f:
@@ -3773,11 +3921,18 @@ def check_status(app_paths: AppPaths):
                 log(f"Storage path: {cfg_dir}")
 
         if sys.platform.startswith("linux"):
-            df = os.path.expanduser("~/.local/share/applications/antigravity-ide.desktop")
+            is_ide = is_ide_app(app_paths)
+            desktop_filename = "antigravity-ide.desktop" if is_ide else "antigravity.desktop"
+            df = os.path.expanduser(f"~/.local/share/applications/{desktop_filename}")
             if os.path.isfile(df):
                 log_success(f"Desktop shortcut: Active ({df})")
             else:
-                log_warn("Desktop shortcut: Not found (will be created automatically on next run).")
+                alt_filename = "antigravity.desktop" if is_ide else "antigravity-ide.desktop"
+                alt_df = os.path.expanduser(f"~/.local/share/applications/{alt_filename}")
+                if os.path.isfile(alt_df):
+                    log_success(f"Desktop shortcut: Active ({alt_df})")
+                else:
+                    log_warn("Desktop shortcut: Not found (will be created automatically on next run).")
 
         update_file, update_ver = find_pending_update()
         if update_file:
@@ -3853,11 +4008,43 @@ def check_status(app_paths: AppPaths):
         log(f"Original factory backup present: {backup_orig}")
 
     if sys.platform.startswith("linux"):
-        df = os.path.expanduser("~/.local/share/applications/antigravity-ide.desktop")
+        for cfg in ("~/.config/Antigravity", "~/.config/antigravity"):
+            cfg_dir = os.path.expanduser(cfg)
+            if os.path.exists(cfg_dir):
+                log(f"Storage path: {cfg_dir}")
+                ws = os.path.join(cfg_dir, "window_state.json")
+                if os.path.isfile(ws):
+                    log(f"Window state file: {ws}")
+                break
+    elif sys.platform == "darwin":
+        cfg_dir = os.path.expanduser("~/Library/Application Support/Antigravity")
+        if os.path.exists(cfg_dir):
+            log(f"Storage path: {cfg_dir}")
+            ws = os.path.join(cfg_dir, "window_state.json")
+            if os.path.isfile(ws):
+                log(f"Window state file: {ws}")
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Roaming")
+        cfg_dir = os.path.join(appdata, "Antigravity")
+        if os.path.exists(cfg_dir):
+            log(f"Storage path: {cfg_dir}")
+            ws = os.path.join(cfg_dir, "window_state.json")
+            if os.path.isfile(ws):
+                log(f"Window state file: {ws}")
+
+    if sys.platform.startswith("linux"):
+        is_ide = is_ide_app(app_paths)
+        desktop_filename = "antigravity-ide.desktop" if is_ide else "antigravity.desktop"
+        df = os.path.expanduser(f"~/.local/share/applications/{desktop_filename}")
         if os.path.isfile(df):
             log_success(f"Desktop shortcut: Active ({df})")
         else:
-            log_warn("Desktop shortcut: Not found (will be created automatically on next run).")
+            alt_filename = "antigravity.desktop" if is_ide else "antigravity-ide.desktop"
+            alt_df = os.path.expanduser(f"~/.local/share/applications/{alt_filename}")
+            if os.path.isfile(alt_df):
+                log_success(f"Desktop shortcut: Active ({alt_df})")
+            else:
+                log_warn("Desktop shortcut: Not found (will be created automatically on next run).")
 
     update_file, update_ver = find_pending_update()
     if update_file:
