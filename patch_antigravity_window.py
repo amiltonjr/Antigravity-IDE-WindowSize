@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.11"
+__version__ = "1.3.12"
 
 import argparse
 import ast
@@ -2027,15 +2027,7 @@ def is_app_running(app_paths: AppPaths) -> bool:
                 return False
 
     elif sys.platform == "darwin":
-        try:
-            res = subprocess.run(
-                ["pgrep", "-f", f"{app_paths.app_root}/Contents/MacOS/Antigravity"],
-                capture_output=True,
-                timeout=5,
-            )
-            return res.returncode == 0
-        except Exception:
-            return False
+        return len(get_running_app_pids(app_paths)) > 0
     else:
         # Linux
         return len(get_running_app_pids(app_paths)) > 0
@@ -2066,12 +2058,24 @@ def get_running_app_pids(app_paths: AppPaths) -> list:
             pass
     elif sys.platform == "darwin":
         try:
-            bin_target = f"{app_paths.app_root}/Contents/MacOS/Antigravity"
-            res = subprocess.run(["pgrep", "-f", bin_target], capture_output=True, text=True, timeout=5)
+            app_root_norm = app_paths.app_root.rstrip("/")
+            app_root_real = os.path.realpath(app_root_norm).rstrip("/")
+            prefixes = {f"{app_root_norm}/Contents/", f"{app_root_real}/Contents/"}
+            res = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=5)
             if res.returncode == 0 and res.stdout:
-                for line in res.stdout.strip().split():
-                    if line.isdigit() and int(line) != my_pid:
-                        pids.append(int(line))
+                for line in res.stdout.splitlines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    parts = stripped.split(None, 1)
+                    if len(parts) < 2 or not parts[0].isdigit():
+                        continue
+                    pid = int(parts[0])
+                    cmd = parts[1]
+                    if pid == my_pid or "patch_antigravity" in cmd:
+                        continue
+                    if any(cmd.startswith(pref) or f" {pref}" in cmd for pref in prefixes):
+                        pids.append(pid)
         except Exception:
             pass
     else:
@@ -2102,21 +2106,47 @@ def get_running_app_pids(app_paths: AppPaths) -> list:
 
 def is_running_inside_app(app_paths: AppPaths) -> bool:
     """Checks if the current Python script is running as a child or descendant of Antigravity."""
-    if sys.platform != "linux" or not app_paths:
+    if not app_paths:
         return False
-    app_pids = set(get_running_app_pids(app_paths))
-    curr = os.getppid()
-    visited = set()
-    while curr > 1 and curr not in visited:
-        visited.add(curr)
-        if curr in app_pids:
-            return True
-        try:
-            with open(f"/proc/{curr}/stat", "r") as f:
-                parts = f.read().split()
-                curr = int(parts[3])
-        except Exception:
-            break
+    if sys.platform.startswith("linux"):
+        app_pids = set(get_running_app_pids(app_paths))
+        curr = os.getppid()
+        visited = set()
+        while curr > 1 and curr not in visited:
+            visited.add(curr)
+            if curr in app_pids:
+                return True
+            try:
+                with open(f"/proc/{curr}/stat", "r") as f:
+                    parts = f.read().split()
+                    curr = int(parts[3])
+            except Exception:
+                break
+        return False
+    if sys.platform == "darwin":
+        app_pids = set(get_running_app_pids(app_paths))
+        if not app_pids:
+            return False
+        curr = os.getppid()
+        visited = set()
+        while curr > 1 and curr not in visited:
+            visited.add(curr)
+            if curr in app_pids:
+                return True
+            try:
+                res = subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", str(curr)],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                ppid_str = res.stdout.strip()
+                if res.returncode != 0 or not ppid_str.isdigit():
+                    break
+                curr = int(ppid_str)
+            except Exception:
+                break
+        return False
     return False
 
 
@@ -2129,10 +2159,18 @@ def kill_running_app(app_paths: AppPaths):
         except Exception as e:
             log_error(f"Error terminating process: {e}")
     elif sys.platform == "darwin":
-        try:
-            subprocess.run(["pkill", "-f", f"{app_paths.app_root}/Contents/MacOS/Antigravity"], check=False)
-        except Exception as e:
-            log_error(f"Error terminating process: {e}")
+        import signal
+        for pid in get_running_app_pids(app_paths):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                log_error(f"Error terminating process {pid}: {e}")
+        for _ in range(15):
+            if not is_app_running(app_paths):
+                break
+            time.sleep(0.2)
     else:
         # Linux: Terminate targeted PIDs directly without pkill to avoid self-termination
         import signal
@@ -2319,6 +2357,103 @@ def build_asar(header: dict, payload: bytes) -> bytes:
         + (b"\x00" * pad_len)
     )
     return header_bytes + payload
+
+
+def compute_asar_header_sha256(asar_bytes_or_path) -> str:
+    """Calculates the SHA-256 of the raw ASAR header JSON matching ElectronAsarIntegrity."""
+    if isinstance(asar_bytes_or_path, (bytes, bytearray)):
+        if len(asar_bytes_or_path) < 16:
+            raise ValueError("ASAR data is truncated or invalid.")
+        _, _, _, json_size = struct.unpack("<4I", asar_bytes_or_path[:16])
+        json_bytes = asar_bytes_or_path[16 : 16 + json_size]
+        return hashlib.sha256(json_bytes).hexdigest()
+    with open(asar_bytes_or_path, "rb") as f:
+        hdr = f.read(16)
+        if len(hdr) < 16:
+            raise ValueError("ASAR file is truncated or invalid.")
+        _, _, _, json_size = struct.unpack("<4I", hdr)
+        json_bytes = f.read(json_size)
+    return hashlib.sha256(json_bytes).hexdigest()
+
+
+def install_needs_patch(app_paths: AppPaths, add_pause: bool = False) -> bool:
+    """Returns True if the current installation still requires window or Pause/Play patching."""
+    if app_paths.is_unpacked:
+        utils_path = os.path.join(app_paths.app_dir or "", "dist", "utils.js")
+        if not os.path.exists(utils_path):
+            return False
+        with open(utils_path, "r", encoding="utf-8", errors="ignore") as f:
+            code = f.read()
+        is_native = is_native_window_persistence_supported(app_paths, code)
+    elif app_paths.asar_path and os.path.exists(app_paths.asar_path):
+        try:
+            header, payload = parse_asar(app_paths.asar_path)
+            ue = header["files"]["dist"]["files"]["utils.js"]
+            code = payload[int(ue["offset"]) : int(ue["offset"]) + ue["size"]].decode("utf-8", "ignore")
+        except Exception:
+            return False
+        is_native = is_native_window_persistence_supported(header, code)
+    else:
+        return False
+
+    need_window = (not is_native) and (PATCH_MARKER not in code)
+    need_pause = bool(add_pause and not is_pause_patch_up_to_date(code))
+    return need_window or need_pause
+
+
+def handle_running_app_before_write(app_paths: AppPaths, action_noun: str, action_gerund: str, force_kill: bool = False):
+    """Handles closing or safely continuing when Antigravity is running before modifying app.asar."""
+    if not is_app_running(app_paths):
+        return
+    app_name = get_app_display_name(app_paths)
+    if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
+        log_warn(f"{app_name} is currently running (script launched from inside its integrated terminal/session).")
+        log(f"{action_gerund.capitalize()} in-place safely without terminating current session...")
+        log(f"Please restart {app_name} after completion to load the changes.")
+        return
+    if sys.platform == "darwin" and is_running_inside_app(app_paths):
+        log_error(
+            f"{app_name} is running and this script was launched from inside {app_name}'s own terminal."
+        )
+        log_error(
+            f"Closing {app_name} from here would terminate this process before writing app.asar."
+        )
+        log_error(
+            f"Please quit {app_name} manually and re-run this command from macOS Terminal (or another external terminal)."
+        )
+        sys.exit(1)
+    if force_kill:
+        kill_running_app(app_paths)
+        return
+    log_warn(f"{app_name} is currently running.")
+    if sys.platform.startswith("linux"):
+        if sys.stdin.isatty():
+            try:
+                resp = input(f"Do you want to close {app_name} to {action_noun} now? [y/N]: ").strip().lower()
+                if resp in ("y", "yes", "s", "sim"):
+                    kill_running_app(app_paths)
+                else:
+                    log(f"{action_gerund.capitalize()} in-place without closing. Please restart {app_name} when done.")
+            except (EOFError, KeyboardInterrupt):
+                log_error("\nOperation aborted.")
+                sys.exit(1)
+        else:
+            log(f"{action_gerund.capitalize()} in-place safely without closing. Please restart {app_name} when done.")
+    else:
+        if sys.stdin.isatty():
+            try:
+                resp = input(f"Do you want to close {app_name} to {action_noun} now? [y/N]: ").strip().lower()
+                if resp in ("y", "yes", "s", "sim"):
+                    kill_running_app(app_paths)
+                else:
+                    log_error(f"Operation aborted. Please close {app_name} before continuing.")
+                    sys.exit(1)
+            except (EOFError, KeyboardInterrupt):
+                log_error("\nOperation aborted.")
+                sys.exit(1)
+        else:
+            log_error(f"{app_name} is running. Close it or use --kill to automatically terminate it.")
+            sys.exit(1)
 
 
 def load_patch_info(app_paths: AppPaths) -> dict:
@@ -2807,6 +2942,7 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
     log("Rebuilding new app.asar archive...")
     new_asar_bytes = build_asar(header, new_payload)
     new_asar_sha256 = hashlib.sha256(new_asar_bytes).hexdigest()
+    new_asar_header_sha256 = compute_asar_header_sha256(new_asar_bytes)
 
     # Safety backups and version tracking
     backup_orig = app_paths.backup_orig
@@ -2815,44 +2951,7 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
         f"app.asar.backup-{time.strftime('%Y%m%d-%H%M%S')}",
     )
 
-    if is_app_running(app_paths):
-        app_name = get_app_display_name(app_paths)
-        if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
-            log_warn(f"{app_name} is currently running (script launched from inside its integrated terminal/session).")
-            log("Applying patch in-place safely without terminating current session...")
-            log(f"Please restart {app_name} after patching to load the updated functionality.")
-        elif force_kill:
-            kill_running_app(app_paths)
-        else:
-            log_warn(f"{app_name} is currently running.")
-            if sys.platform.startswith("linux"):
-                if sys.stdin.isatty():
-                    try:
-                        resp = input(f"Do you want to close {app_name} to apply the patch now? [y/N]: ").strip().lower()
-                        if resp in ("y", "yes", "s", "sim"):
-                            kill_running_app(app_paths)
-                        else:
-                            log(f"Applying patch in-place without closing. Please restart {app_name} when done.")
-                    except (EOFError, KeyboardInterrupt):
-                        log_error("\nOperation aborted.")
-                        sys.exit(1)
-                else:
-                    log(f"Applying patch in-place safely without closing. Please restart {app_name} when done.")
-            else:
-                if sys.stdin.isatty():
-                    try:
-                        resp = input(f"Do you want to close {app_name} to apply the patch now? [y/N]: ").strip().lower()
-                        if resp in ("y", "yes", "s", "sim"):
-                            kill_running_app(app_paths)
-                        else:
-                            log_error(f"Operation aborted. Please close {app_name} before applying the patch.")
-                            sys.exit(1)
-                    except (EOFError, KeyboardInterrupt):
-                        log_error("\nOperation aborted.")
-                        sys.exit(1)
-                else:
-                    log_error(f"{app_name} is running. Close it or use --kill to automatically terminate it.")
-                    sys.exit(1)
+    handle_running_app_before_write(app_paths, "apply the patch", "applying patch", force_kill=force_kill)
 
     try:
         with open(asar_path, "rb") as f:
@@ -2932,10 +3031,10 @@ def apply_patch(app_paths: AppPaths, force_kill: bool = False, add_pause: bool =
                 plist = plistlib.load(f)
 
             if "ElectronAsarIntegrity" in plist and "Resources/app.asar" in plist["ElectronAsarIntegrity"]:
-                plist["ElectronAsarIntegrity"]["Resources/app.asar"]["hash"] = new_asar_sha256
+                plist["ElectronAsarIntegrity"]["Resources/app.asar"]["hash"] = new_asar_header_sha256
                 with open(app_paths.info_plist_path, "wb") as f:
                     plistlib.dump(plist, f)
-                log_success("Info.plist successfully updated with new SHA-256 integrity hash.")
+                log_success("Info.plist successfully updated with new ASAR integrity hash.")
             else:
                 log_warn("ElectronAsarIntegrity key not present or format mismatch.")
         except Exception as e:
@@ -3216,6 +3315,9 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
             online_update = check_online_update(app_paths)
             if not online_update:
                 log_success(f"{app_name} is already up to date! No updates available.")
+                if install_needs_patch(app_paths, effective_add_pause):
+                    log("Applying pending patches to current installation...")
+                    apply_patch(app_paths, force_kill=force_kill, add_pause=effective_add_pause)
                 return
 
             update_version = online_update["version"]
@@ -3238,8 +3340,12 @@ def apply_pending_update(app_paths: AppPaths, force_kill: bool = False, add_paus
             update_file = dest_file
         else:
             log_warn("No pending official update found in local updater cache.")
-            log(f"If {app_name} recently notified you of an update, ensure it has finished downloading.")
-            log("You can also download the latest version directly from https://antigravity.google/download")
+            if install_needs_patch(app_paths, effective_add_pause):
+                log("Applying requested patches to current installation...")
+                apply_patch(app_paths, force_kill=force_kill, add_pause=effective_add_pause)
+            else:
+                log(f"If {app_name} recently notified you of an update, ensure it has finished downloading.")
+                log("You can also download the latest version directly from https://antigravity.google/download")
             return
 
     if update_file and update_version == "latest" and update_file.lower().endswith((".tar.gz", ".tgz", ".tar")):
@@ -4211,44 +4317,7 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = 
         else:
             log_warn("Proceeding with restore due to --force flag.")
 
-    if is_app_running(app_paths):
-        app_name = get_app_display_name(app_paths)
-        if sys.platform.startswith("linux") and is_running_inside_app(app_paths):
-            log_warn(f"{app_name} is currently running (script launched from inside its integrated terminal/session).")
-            log("Restoring backup in-place safely without terminating current session...")
-            log(f"Please restart {app_name} when convenient to reload stock version.")
-        elif force_kill:
-            kill_running_app(app_paths)
-        else:
-            log_warn(f"{app_name} is currently running.")
-            if sys.platform.startswith("linux"):
-                if sys.stdin.isatty():
-                    try:
-                        resp = input(f"Do you want to close {app_name} to restore the backup? [y/N]: ").strip().lower()
-                        if resp in ("y", "yes", "s", "sim"):
-                            kill_running_app(app_paths)
-                        else:
-                            log(f"Restoring backup in-place without closing. Please restart {app_name} when convenient.")
-                    except (EOFError, KeyboardInterrupt):
-                        log_error("\nOperation aborted.")
-                        sys.exit(1)
-                else:
-                    log(f"Restoring backup in-place safely without closing. Please restart {app_name} when convenient.")
-            else:
-                if sys.stdin.isatty():
-                    try:
-                        resp = input(f"Do you want to close {app_name} to restore the backup? [y/N]: ").strip().lower()
-                        if resp in ("y", "yes", "s", "sim"):
-                            kill_running_app(app_paths)
-                        else:
-                            log_error(f"Operation aborted. Please close {app_name} before restoring.")
-                            sys.exit(1)
-                    except (EOFError, KeyboardInterrupt):
-                        log_error("\nOperation aborted.")
-                        sys.exit(1)
-                else:
-                    log_error(f"{app_name} is running. Close it or use --kill to restore.")
-                    sys.exit(1)
+    handle_running_app_before_write(app_paths, "restore the backup", "restoring backup", force_kill=force_kill)
 
     log(f"Restoring {backup_orig} -> {asar_path}...")
     try:
@@ -4273,12 +4342,11 @@ def restore_backup(app_paths: AppPaths, force_kill: bool = False, force: bool = 
         try:
             import plistlib
 
-            with open(backup_orig, "rb") as f:
-                orig_sha256 = hashlib.sha256(f.read()).hexdigest()
+            orig_header_sha256 = compute_asar_header_sha256(backup_orig)
             with open(app_paths.info_plist_path, "rb") as f:
                 plist = plistlib.load(f)
             if "ElectronAsarIntegrity" in plist and "Resources/app.asar" in plist["ElectronAsarIntegrity"]:
-                plist["ElectronAsarIntegrity"]["Resources/app.asar"]["hash"] = orig_sha256
+                plist["ElectronAsarIntegrity"]["Resources/app.asar"]["hash"] = orig_header_sha256
                 with open(app_paths.info_plist_path, "wb") as f:
                     plistlib.dump(plist, f)
                 log_success("Info.plist restored.")
