@@ -21,7 +21,7 @@ Features:
 
 __author__ = "Amilton Camargo Junior (Comandante)"
 __url__ = "https://comandanteamilton.com.br/"
-__version__ = "1.3.10"
+__version__ = "1.3.11"
 
 import argparse
 import ast
@@ -2602,17 +2602,24 @@ def generate_pause_patched_utils_js(original_code: str) -> str:
         _agyPauseWc.on("did-finish-load", _injectAntigravityPausePlay);
     }}"""
 
-    target_load_url = "void win.loadURL(url);"
-    if target_load_url in original_code:
-        target_to_replace = target_load_url
-        replacement_to_use = f"{pause_listeners}\n\n    {target_load_url}"
-    else:
-        match_lu = re.search(r"void\s+win\.loadURL\s*\(\s*url\s*\)\s*;", original_code)
+    load_url_patterns = (
+        r"void\s+win\.loadURL\s*\(\s*url[^;\r\n]*\)\s*;",
+        r"void\s+loadHubWindowUrl\s*\(\s*win\s*,[^;\r\n]+\)\s*;",
+        r"void\s+loadHubWindowUrl\s*\(\s*win\s*,[^;]{1,200}\)\s*;",
+    )
+    target_to_replace = None
+    for pattern in load_url_patterns:
+        match_lu = re.search(pattern, original_code)
         if match_lu:
             target_to_replace = match_lu.group(0)
-            replacement_to_use = f"{pause_listeners}\n\n    {target_to_replace}"
-        else:
-            raise RuntimeError("Snippet 'void win.loadURL(url);' not found in dist/utils.js")
+            break
+
+    if not target_to_replace:
+        raise RuntimeError(
+            "Snippet 'void win.loadURL(url);' or 'void loadHubWindowUrl(win, ...);' not found in dist/utils.js"
+        )
+
+    replacement_to_use = f"{pause_listeners}\n\n    {target_to_replace}"
 
     return pause_prelude + original_code.replace(target_to_replace, replacement_to_use, 1)
 
